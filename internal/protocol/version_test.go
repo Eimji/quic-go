@@ -6,6 +6,10 @@ import (
 )
 
 var _ = Describe("Version", func() {
+	isReservedVersion := func(v VersionNumber) bool {
+		return v&0x0f0f0f0f == 0x0a0a0a0a
+	}
+
 	// version numbers taken from the wiki: https://github.com/quicwg/base-drafts/wiki/QUIC-Versions
 	It("has the right gQUIC version number", func() {
 		Expect(Version39).To(BeEquivalentTo(0x51303339))
@@ -14,6 +18,11 @@ var _ = Describe("Version", func() {
 	It("says if a version supports TLS", func() {
 		Expect(Version39.UsesTLS()).To(BeFalse())
 		Expect(VersionTLS.UsesTLS()).To(BeTrue())
+	})
+
+	It("versions don't have reserved version numbers", func() {
+		Expect(isReservedVersion(Version39)).To(BeFalse())
+		Expect(isReservedVersion(VersionTLS)).To(BeFalse())
 	})
 
 	It("has the right string representation", func() {
@@ -104,5 +113,15 @@ var _ = Describe("Version", func() {
 			_, ok = ChooseSupportedVersion([]VersionNumber{}, []VersionNumber{})
 			Expect(ok).To(BeFalse())
 		})
+	})
+
+	It("creates reserved version numbers", func() {
+		var last VersionNumber
+		for i := 0; i < 10; i++ {
+			v := GenerateReservedVersion()
+			Expect(v).ToNot(Equal(last))
+			Expect(isReservedVersion(v)).To(BeTrue())
+			last = v
+		}
 	})
 })

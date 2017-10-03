@@ -1,11 +1,13 @@
 package protocol
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 )
 
 // VersionNumber is a version number as int
-type VersionNumber int
+type VersionNumber int32
 
 // gQUIC version range as defined in the wiki: https://github.com/quicwg/base-drafts/wiki/QUIC-Versions
 const (
@@ -111,4 +113,11 @@ func ChooseSupportedVersion(ours, theirs []VersionNumber) (VersionNumber, bool) 
 		}
 	}
 	return 0, false
+}
+
+// GenerateReservedVersion generates a reserved version number (v & 0x0f0f0f0f == 0x0a0a0a0a)
+func GenerateReservedVersion() VersionNumber {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b) // ignore the error here. Failure to read random data doesn't break anything
+	return VersionNumber((binary.BigEndian.Uint32(b) | 0x0a0a0a0a) & 0xfafafafa)
 }
