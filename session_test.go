@@ -468,9 +468,6 @@ var _ = Describe("Session", func() {
 		})
 
 		It("handles CONNECTION_CLOSE frames", func() {
-			cryptoStream := mocks.NewMockStreamI(mockCtrl)
-			cryptoStream.EXPECT().Cancel(gomock.Any())
-			sess.cryptoStream = cryptoStream
 			done := make(chan struct{})
 			go func() {
 				defer GinkgoRecover()
@@ -1557,7 +1554,10 @@ var _ = Describe("Client Session", func() {
 		})
 
 		It("passes the diversification nonce to the cryptoSetup", func() {
-			go sess.run()
+			go func() {
+				defer GinkgoRecover()
+				sess.run()
+			}()
 			hdr.PacketNumber = 5
 			hdr.DiversificationNonce = []byte("foobar")
 			err := sess.handlePacketImpl(&receivedPacket{header: hdr})

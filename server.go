@@ -19,6 +19,7 @@ import (
 // packetHandler handles packets
 type packetHandler interface {
 	Session
+	getCryptoStream() cryptoStream
 	handshakeStatus() <-chan handshakeEvent
 	handlePacket(*receivedPacket)
 	GetVersion() protocol.VersionNumber
@@ -31,7 +32,8 @@ type server struct {
 	tlsConf *tls.Config
 	config  *Config
 
-	conn net.PacketConn
+	conn      net.PacketConn
+	serverTLS *serverTLS
 
 	certChain crypto.CertChain
 	scfg      *handshake.ServerConfig
@@ -77,11 +79,20 @@ func Listen(conn net.PacketConn, tlsConf *tls.Config, config *Config) (Listener,
 	if err != nil {
 		return nil, err
 	}
+	config = populateServerConfig(config)
 
+	cookieHandler, err := handshake.NewCookieHandler(config.AcceptCookie)
+	if err != nil {
+		return nil, err
+	}
+	serverTLS, sessionChan, err := newServerTLS(conn, config, cookieHandler, tlsConf)
+	if err != nil {
+		return nil, err
+	}
 	s := &server{
 		conn:                      conn,
 		tlsConf:                   tlsConf,
-		config:                    populateServerConfig(config),
+		config:                    config,
 		certChain:                 certChain,
 		scfg:                      scfg,
 		sessions:                  map[protocol.ConnectionID]packetHandler{},
@@ -89,8 +100,25 @@ func Listen(conn net.PacketConn, tlsConf *tls.Config, config *Config) (Listener,
 		deleteClosedSessionsAfter: protocol.ClosedSessionDeleteTimeout,
 		sessionQueue:              make(chan Session, 5),
 		errorChan:                 make(chan struct{}),
+		serverTLS:                 serverTLS,
 	}
 	go s.serve()
+	// handle TLS connection establishment statelessly
+	go func() {
+		for {
+			select {
+			case <-s.errorChan:
+				return
+			case sess := <-sessionChan:
+				// TODO: think about what to do with connection ID collisions
+				connID := sess.(*session).connectionID
+				s.sessionsMutex.Lock()
+				s.sessions[connID] = sess
+				s.sessionsMutex.Unlock()
+				s.runHandshakeAndSession(sess, connID)
+			}
+		}
+	}()
 	utils.Debugf("Listening for %s connections on %s", conn.LocalAddr().Network(), conn.LocalAddr().String())
 	return s, nil
 }
@@ -225,7 +253,13 @@ func (s *server) handlePacket(pconn net.PacketConn, remoteAddr net.Addr, packet 
 		return qerr.Error(qerr.InvalidPacketHeader, err.Error())
 	}
 	hdr.Raw = packet[:len(packet)-r.Len()]
+	packetData := packet[len(packet)-r.Len():]
 	connID := hdr.ConnectionID
+
+	if hdr.Type == protocol.PacketTypeInitial {
+		go s.serverTLS.HandleInitial(remoteAddr, hdr, packetData)
+		return nil
+	}
 
 	s.sessionsMutex.RLock()
 	session, sessionKnown := s.sessions[connID]
@@ -279,11 +313,6 @@ func (s *server) handlePacket(pconn net.PacketConn, remoteAddr net.Addr, packet 
 			return err
 		}
 	}
-	// send an IETF draft style Version Negotiation Packet, if the client sent an unsupported version with an IETF draft style header
-	if hdr.Type == protocol.PacketTypeInitial && !protocol.IsSupportedVersion(s.config.Versions, hdr.Version) {
-		_, err := pconn.WriteTo(wire.ComposeVersionNegotiation(hdr.ConnectionID, hdr.PacketNumber, hdr.Version, s.config.Versions), remoteAddr)
-		return err
-	}
 
 	if !sessionKnown {
 		version := hdr.Version
@@ -307,32 +336,36 @@ func (s *server) handlePacket(pconn net.PacketConn, remoteAddr net.Addr, packet 
 		s.sessions[connID] = session
 		s.sessionsMutex.Unlock()
 
-		go func() {
-			// session.run() returns as soon as the session is closed
-			_ = session.run()
-			s.removeConnection(connID)
-		}()
-
-		go func() {
-			for {
-				ev := <-session.handshakeStatus()
-				if ev.err != nil {
-					return
-				}
-				if ev.encLevel == protocol.EncryptionForwardSecure {
-					break
-				}
-			}
-			s.sessionQueue <- session
-		}()
+		s.runHandshakeAndSession(session, connID)
 	}
 	session.handlePacket(&receivedPacket{
 		remoteAddr: remoteAddr,
 		header:     hdr,
-		data:       packet[len(packet)-r.Len():],
+		data:       packetData,
 		rcvTime:    rcvTime,
 	})
 	return nil
+}
+
+func (s *server) runHandshakeAndSession(session packetHandler, connID protocol.ConnectionID) {
+	go func() {
+		_ = session.run()
+		// session.run() returns as soon as the session is closed
+		s.removeConnection(connID)
+	}()
+
+	go func() {
+		for {
+			ev := <-session.handshakeStatus()
+			if ev.err != nil {
+				return
+			}
+			if ev.encLevel == protocol.EncryptionForwardSecure {
+				break
+			}
+		}
+		s.sessionQueue <- session
+	}()
 }
 
 func (s *server) removeConnection(id protocol.ConnectionID) {

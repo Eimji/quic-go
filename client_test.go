@@ -87,7 +87,7 @@ var _ = Describe("Client", func() {
 				_ protocol.VersionNumber,
 				_ []protocol.VersionNumber,
 			) (packetHandler, error) {
-				Expect(conn.Write([]byte("fake CHLO"))).To(Succeed())
+				Expect(conn.Write([]byte("0 fake CHLO"))).To(Succeed())
 				return sess, nil
 			}
 			origGenerateConnectionID = generateConnectionID

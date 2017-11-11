@@ -28,7 +28,6 @@ type mockCryptoSetup struct {
 	divNonce           []byte
 	encLevelSeal       protocol.EncryptionLevel
 	encLevelSealCrypto protocol.EncryptionLevel
-	nextPacketType     protocol.PacketType
 }
 
 var _ handshake.CryptoSetup = &mockCryptoSetup{}
@@ -50,7 +49,6 @@ func (m *mockCryptoSetup) GetSealerWithEncryptionLevel(protocol.EncryptionLevel)
 }
 func (m *mockCryptoSetup) DiversificationNonce() []byte            { return m.divNonce }
 func (m *mockCryptoSetup) SetDiversificationNonce(divNonce []byte) { m.divNonce = divNonce }
-func (m *mockCryptoSetup) GetNextPacketType() protocol.PacketType  { return m.nextPacketType }
 
 var _ = Describe("Packet packer", func() {
 	var (
@@ -69,7 +67,7 @@ var _ = Describe("Packet packer", func() {
 		packer = &packetPacker{
 			cryptoSetup:           &mockCryptoSetup{encLevelSeal: protocol.EncryptionForwardSecure},
 			connectionID:          0x1337,
-			packetNumberGenerator: newPacketNumberGenerator(protocol.SkipPacketAveragePeriodLength),
+			packetNumberGenerator: newPacketNumberGenerator(1, protocol.SkipPacketAveragePeriodLength),
 			streamFramer:          streamFramer,
 			perspective:           protocol.PerspectiveServer,
 		}
@@ -189,13 +187,6 @@ var _ = Describe("Packet packer", func() {
 				Expect(h.IsLongHeader).To(BeTrue())
 				Expect(h.PacketNumberLen).To(Equal(protocol.PacketNumberLen4))
 				Expect(h.Version).To(Equal(versionIETFHeader))
-			})
-
-			It("sets the packet type based on the state of the handshake", func() {
-				packer.cryptoSetup.(*mockCryptoSetup).nextPacketType = 5
-				h := packer.getHeader(protocol.EncryptionSecure)
-				Expect(h.IsLongHeader).To(BeTrue())
-				Expect(h.Type).To(Equal(protocol.PacketType(5)))
 			})
 
 			It("uses the Short Header format for forward-secure packets", func() {

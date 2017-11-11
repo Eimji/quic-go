@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
@@ -28,9 +29,12 @@ type client struct {
 
 	tlsConf *tls.Config
 	config  *Config
+	tls     handshake.MintTLS // only used when using TLS
 
 	connectionID protocol.ConnectionID
-	version      protocol.VersionNumber
+
+	initialVersion protocol.VersionNumber
+	version        protocol.VersionNumber
 
 	session packetHandler
 }
@@ -91,7 +95,6 @@ func DialNonFWSecure(
 	if tlsConf != nil {
 		hostname = tlsConf.ServerName
 	}
-
 	if hostname == "" {
 		hostname, _, err = net.SplitHostPort(host)
 		if err != nil {
@@ -112,8 +115,14 @@ func DialNonFWSecure(
 
 	utils.Infof("Starting new connection to %s (%s -> %s), connectionID %x, version %s", hostname, c.conn.LocalAddr().String(), c.conn.RemoteAddr().String(), c.connectionID, c.version)
 
-	if err := c.establishSecureConnection(); err != nil {
-		return nil, err
+	if c.version.UsesTLS() {
+		if err := c.dialTLS(hostname); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := c.dialGQUIC(); err != nil {
+			return nil, err
+		}
 	}
 	return c.session.(NonFWSession), nil
 }
@@ -177,11 +186,51 @@ func populateClientConfig(config *Config) *Config {
 	}
 }
 
-// establishSecureConnection returns as soon as the connection is secure (as opposed to forward-secure)
-func (c *client) establishSecureConnection() error {
-	if err := c.createNewSession(c.version, nil); err != nil {
+func (c *client) dialGQUIC() error {
+	if err := c.createNewSession(nil); err != nil {
 		return err
 	}
+	return c.establishSecureConnection()
+}
+
+func (c *client) dialTLS(hostname string) error {
+	csc := handshake.NewCryptoStreamConn(nil)
+	mintConf, err := tlsToMintConfig(c.tlsConf, protocol.PerspectiveClient)
+	if err != nil {
+		return err
+	}
+	mintConf.ServerName = hostname
+	c.tls = newMintController(csc, mintConf, protocol.PerspectiveClient)
+	params := &handshake.TransportParameters{
+		StreamFlowControlWindow:     protocol.ReceiveStreamFlowControlWindow,
+		ConnectionFlowControlWindow: protocol.ReceiveConnectionFlowControlWindow,
+		MaxStreams:                  protocol.MaxIncomingStreams,
+		IdleTimeout:                 c.config.IdleTimeout,
+		OmitConnectionID:            c.config.RequestConnectionIDOmission,
+	}
+	eh := handshake.NewExtensionHandlerClient(params, c.initialVersion, c.config.Versions, c.version)
+	if err := c.tls.SetExtensionHandler(eh); err != nil {
+		return err
+	}
+	if err := c.createNewTLSSession(eh.GetPeerParams(), c.version, nil); err != nil {
+		return err
+	}
+	if err := c.establishSecureConnection(); err != nil {
+		if err != handshake.ErrCloseSessionForRetry {
+			return err
+		}
+		if err := c.createNewTLSSession(eh.GetPeerParams(), c.version, nil); err != nil {
+			return err
+		}
+		if err := c.establishSecureConnection(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// establishSecureConnection returns as soon as the connection is secure (as opposed to forward-secure)
+func (c *client) establishSecureConnection() error {
 	go c.listen()
 
 	var runErr error
@@ -190,12 +239,14 @@ func (c *client) establishSecureConnection() error {
 		// session.run() returns as soon as the session is closed
 		runErr = c.session.run()
 		if runErr == errCloseSessionForNewVersion {
-			// run the new session
+			// run the new sessio
 			runErr = c.session.run()
 		}
 		close(errorChan)
 		utils.Infof("Connection %x closed.", c.connectionID)
-		c.conn.Close()
+		if runErr != handshake.ErrCloseSessionForRetry {
+			c.conn.Close()
+		}
 	}()
 
 	// wait until the server accepts the QUIC version (or an error occurs)
@@ -238,6 +289,7 @@ func (c *client) listen() {
 			break
 		}
 		data = data[:n]
+		utils.Debugf("got packet (%d bytes)", n)
 
 		c.handlePacket(addr, data)
 	}
@@ -257,14 +309,19 @@ func (c *client) handlePacket(remoteAddr net.Addr, packet []byte) {
 	if hdr.OmitConnectionID && !c.config.RequestConnectionIDOmission {
 		return
 	}
-	// reject packets with the wrong connection ID
-	if !hdr.OmitConnectionID && hdr.ConnectionID != c.connectionID {
-		return
-	}
 	hdr.Raw = packet[:len(packet)-r.Len()]
+
+	if c.version.UsesTLS() && hdr.Type == protocol.PacketTypeRetry {
+		utils.Infof("Received a Retry packet. Recreating session.")
+	}
 
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+
+	// reject packets with the wrong connection ID
+	// if !hdr.OmitConnectionID && hdr.ConnectionID != c.connectionID {
+	// 	return
+	// }
 
 	if hdr.ResetFlag {
 		cr := c.conn.RemoteAddr()
@@ -333,7 +390,7 @@ func (c *client) handleVersionNegotiationPacket(hdr *wire.Header) error {
 	}
 
 	// switch to negotiated version
-	initialVersion := c.version
+	c.initialVersion = c.version
 	c.version = newVersion
 	var err error
 	c.connectionID, err = utils.GenerateConnectionID()
@@ -346,12 +403,10 @@ func (c *client) handleVersionNegotiationPacket(hdr *wire.Header) error {
 	// the new session must be created first to update client member variables
 	oldSession := c.session
 	defer oldSession.Close(errCloseSessionForNewVersion)
-	return c.createNewSession(initialVersion, hdr.SupportedVersions)
+	return c.createNewSession(hdr.SupportedVersions)
 }
 
-func (c *client) createNewSession(initialVersion protocol.VersionNumber, negotiatedVersions []protocol.VersionNumber) error {
-	var err error
-	utils.Debugf("createNewSession with initial version %s", initialVersion)
+func (c *client) createNewSession(negotiatedVersions []protocol.VersionNumber) (err error) {
 	c.session, err = newClientSession(
 		c.conn,
 		c.hostname,
@@ -359,8 +414,26 @@ func (c *client) createNewSession(initialVersion protocol.VersionNumber, negotia
 		c.connectionID,
 		c.tlsConf,
 		c.config,
-		initialVersion,
+		c.initialVersion,
 		negotiatedVersions,
+	)
+	return err
+}
+
+func (c *client) createNewTLSSession(
+	paramsChan <-chan handshake.TransportParameters,
+	version protocol.VersionNumber,
+	negotiatedVersions []protocol.VersionNumber,
+) (err error) {
+	c.session, err = newTLSClientSession(
+		c.conn,
+		c.hostname,
+		c.connectionID,
+		c.config,
+		c.tls,
+		paramsChan,
+		1,
+		c.version,
 	)
 	return err
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/crypto"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/internal/testdata"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 	"github.com/lucas-clemente/quic-go/qerr"
@@ -67,6 +68,7 @@ func (s *mockSession) RemoteAddr() net.Addr                   { panic("not imple
 func (*mockSession) Context() context.Context                 { panic("not implemented") }
 func (*mockSession) GetVersion() protocol.VersionNumber       { return protocol.VersionWhatever }
 func (s *mockSession) handshakeStatus() <-chan handshakeEvent { return s.handshakeChan }
+func (*mockSession) getCryptoStream() cryptoStream            { panic("not implemented") }
 
 var _ Session = &mockSession{}
 var _ NonFWSession = &mockSession{}
@@ -235,14 +237,14 @@ var _ = Describe("Server", func() {
 		})
 
 		It("works if no quic.Config is given", func(done Done) {
-			ln, err := ListenAddr("127.0.0.1:0", nil, config)
+			ln, err := ListenAddr("127.0.0.1:0", testdata.GetTLSConfig(), nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ln.Close()).To(Succeed())
 			close(done)
 		}, 1)
 
 		It("closes properly", func() {
-			ln, err := ListenAddr("127.0.0.1:0", nil, config)
+			ln, err := ListenAddr("127.0.0.1:0", testdata.GetTLSConfig(), config)
 			Expect(err).ToNot(HaveOccurred())
 
 			var returned bool
