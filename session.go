@@ -202,7 +202,7 @@ func (s *session) setup(
 	)
 	s.streamsMap = newStreamsMap(s.newStream, s.perspective, s.version)
 	s.cryptoStream = s.newStream(s.version.CryptoStreamID())
-	s.streamFramer = newStreamFramer(s.cryptoStream, s.streamsMap, s.connFlowController)
+	s.streamFramer = newStreamFramer(s.cryptoStream, s.streamsMap, s.connFlowController, s.version)
 
 	var err error
 	if s.perspective == protocol.PerspectiveServer {
