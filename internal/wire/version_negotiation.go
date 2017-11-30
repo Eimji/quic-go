@@ -2,6 +2,7 @@ package wire
 
 import (
 	"bytes"
+	"math/rand"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
@@ -19,9 +20,7 @@ func ComposeGQUICVersionNegotiation(connID protocol.ConnectionID, versions []pro
 		utils.Errorf("error composing version negotiation packet: %s", err.Error())
 		return nil
 	}
-	for _, v := range versions {
-		utils.BigEndian.WriteUint32(fullReply, uint32(v))
-	}
+	writeVersions(fullReply, versions)
 	return fullReply.Bytes()
 }
 
@@ -44,8 +43,25 @@ func ComposeVersionNegotiation(
 		utils.Errorf("error composing version negotiation packet: %s", err.Error())
 		return nil
 	}
-	for _, v := range versions {
-		utils.BigEndian.WriteUint32(fullReply, uint32(v))
-	}
+	writeVersions(fullReply, versions)
 	return fullReply.Bytes()
+}
+
+// writeVersions writes the versions for a Version Negotiation Packet.
+// It inserts one reserved version number at a random position.
+func writeVersions(buf *bytes.Buffer, versions []protocol.VersionNumber) {
+	b := make([]byte, 1)
+	_, _ = rand.Read(b) // ignore the error here. Failure to read random data doesn't break anything
+	numVersions := len(versions)
+	reservedVersion := protocol.GenerateReservedVersion()
+	randPos := int(b[0]) % (numVersions + 1)
+	for i, v := range versions {
+		if i == randPos {
+			utils.BigEndian.WriteUint32(buf, uint32(reservedVersion))
+		}
+		utils.BigEndian.WriteUint32(buf, uint32(v))
+	}
+	if randPos == numVersions {
+		utils.BigEndian.WriteUint32(buf, uint32(reservedVersion))
+	}
 }

@@ -16,7 +16,11 @@ var _ = Describe("Version Negotiation Packets", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(hdr.VersionFlag).To(BeTrue())
 		Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x1337)))
-		Expect(hdr.SupportedVersions).To(Equal(versions))
+		// the supported versions should include one reserved version number
+		Expect(hdr.SupportedVersions).To(HaveLen(len(versions) + 1))
+		for _, version := range versions {
+			Expect(hdr.SupportedVersions).To(ContainElement(version))
+		}
 	})
 
 	It("writes IETF draft style", func() {
@@ -28,6 +32,10 @@ var _ = Describe("Version Negotiation Packets", func() {
 		Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x1337)))
 		Expect(hdr.PacketNumber).To(Equal(protocol.PacketNumber(0x42)))
 		Expect(hdr.Version).To(Equal(protocol.VersionNumber(0x1234)))
-		Expect(hdr.SupportedVersions).To(Equal(versions))
+		// the supported versions should include one reserved version number
+		Expect(hdr.SupportedVersions).To(HaveLen(len(versions) + 1))
+		for _, version := range versions {
+			Expect(hdr.SupportedVersions).To(ContainElement(version))
+		}
 	})
 })

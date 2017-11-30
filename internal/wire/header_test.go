@@ -127,7 +127,10 @@ var _ = Describe("Header", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(hdr.isPublicHeader).To(BeTrue())
 			Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x42)))
-			Expect(hdr.SupportedVersions).To(Equal(versions))
+			// in addition to the versions, the supported versions might contain a reserved version number
+			for _, version := range versions {
+				Expect(hdr.SupportedVersions).To(ContainElement(version))
+			}
 		})
 
 		It("parses an IETF draft style Version Negotiation Packet", func() {
@@ -139,7 +142,10 @@ var _ = Describe("Header", func() {
 			Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x42)))
 			Expect(hdr.PacketNumber).To(Equal(protocol.PacketNumber(0x77)))
 			Expect(hdr.Version).To(Equal(protocol.VersionNumber(0x4321)))
-			Expect(hdr.SupportedVersions).To(Equal(versions))
+			// in addition to the versions, the supported versions might contain a reserved version number
+			for _, version := range versions {
+				Expect(hdr.SupportedVersions).To(ContainElement(version))
+			}
 			Expect(hdr.Type).To(Equal(protocol.PacketTypeVersionNegotiation))
 		})
 	})
