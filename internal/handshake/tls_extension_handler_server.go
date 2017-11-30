@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -47,10 +48,7 @@ func (h *extensionHandlerServer) Send(hType mint.HandshakeType, el *mint.Extensi
 		// TODO(#855): generate a real token
 		transportParameter{statelessResetTokenParameterID, bytes.Repeat([]byte{42}, 16)},
 	)
-	supportedVersions := make([]uint32, len(h.supportedVersions))
-	for i, v := range h.supportedVersions {
-		supportedVersions[i] = uint32(v)
-	}
+	supportedVersions := h.getSupportedVersions()
 	data, err := syntax.Marshal(encryptedExtensionsTransportParameters{
 		SupportedVersions: supportedVersions,
 		Parameters:        transportParams,
@@ -59,6 +57,29 @@ func (h *extensionHandlerServer) Send(hType mint.HandshakeType, el *mint.Extensi
 		return err
 	}
 	return el.Add(&tlsExtensionBody{data})
+}
+
+// getSupportedVersions returns the supported versions as uint32
+// It adds one reserved version at a random position.
+func (h *extensionHandlerServer) getSupportedVersions() []uint32 {
+	reservedVersion := protocol.GenerateReservedVersion()
+	b := make([]byte, 1)
+	_, _ = rand.Read(b) // ignore the error here. Failure to read random data doesn't break anything
+	randPos := int(b[0]) % (len(h.supportedVersions) + 1)
+	supportedVersions := make([]uint32, len(h.supportedVersions)+1)
+	var j int
+	for _, v := range h.supportedVersions {
+		if j == randPos {
+			supportedVersions[j] = uint32(reservedVersion)
+			j++
+		}
+		supportedVersions[j] = uint32(v)
+		j++
+	}
+	if randPos == len(h.supportedVersions) {
+		supportedVersions[randPos] = uint32(reservedVersion)
+	}
+	return supportedVersions
 }
 
 func (h *extensionHandlerServer) Receive(hType mint.HandshakeType, el *mint.ExtensionList) error {

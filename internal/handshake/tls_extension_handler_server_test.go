@@ -44,7 +44,8 @@ var _ = Describe("TLS Extension Handler, for the server", func() {
 		})
 
 		It("adds TransportParameters to the EncryptedExtensions message", func() {
-			handler.supportedVersions = []protocol.VersionNumber{13, 37, 42}
+			versions := []protocol.VersionNumber{13, 37, 42}
+			handler.supportedVersions = versions
 			err := handler.Send(mint.HandshakeTypeEncryptedExtensions, &el)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(el).To(HaveLen(1))
@@ -54,7 +55,11 @@ var _ = Describe("TLS Extension Handler, for the server", func() {
 			eetp := &encryptedExtensionsTransportParameters{}
 			_, err = syntax.Unmarshal(ext.data, eetp)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(eetp.SupportedVersions).To(Equal([]uint32{13, 37, 42}))
+			// the SupportedVersions will contain one reserved version number
+			Expect(eetp.SupportedVersions).To(HaveLen(len(versions) + 1))
+			for _, version := range versions {
+				Expect(eetp.SupportedVersions).To(ContainElement(uint32(version)))
+			}
 		})
 	})
 
