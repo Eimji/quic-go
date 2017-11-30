@@ -430,13 +430,9 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 
 	replyMap := h.params.getHelloMap()
 	// add crypto parameters
-	verTag := &bytes.Buffer{}
-	for _, v := range h.supportedVersions {
-		utils.BigEndian.WriteUint32(verTag, uint32(v))
-	}
 	replyMap[TagPUBS] = ephermalKex.PublicKey()
 	replyMap[TagSNO] = serverNonce
-	replyMap[TagVER] = verTag.Bytes()
+	replyMap[TagVER] = h.getSupportedVersions()
 
 	// note that the SHLO *has* to fit into one packet
 	message := HandshakeMessage{
@@ -447,6 +443,25 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 	message.Write(&reply)
 	utils.Debugf("Sending %s", message)
 	return reply.Bytes(), nil
+}
+
+func (h *cryptoSetupServer) getSupportedVersions() []byte {
+	buf := &bytes.Buffer{}
+	b := make([]byte, 1)
+	_, _ = rand.Read(b) // ignore the error here. Failure to read random data doesn't break anything
+	numVersions := len(h.supportedVersions)
+	reservedVersion := protocol.GenerateReservedVersion()
+	randPos := int(b[0]) % (numVersions + 1)
+	for i, v := range h.supportedVersions {
+		if i == randPos {
+			utils.BigEndian.WriteUint32(buf, uint32(reservedVersion))
+		}
+		utils.BigEndian.WriteUint32(buf, uint32(v))
+	}
+	if randPos == numVersions {
+		utils.BigEndian.WriteUint32(buf, uint32(reservedVersion))
+	}
+	return buf.Bytes()
 }
 
 // DiversificationNonce returns the diversification nonce
