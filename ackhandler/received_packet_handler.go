@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 )
 
@@ -61,6 +62,7 @@ func (h *receivedPacketHandler) ReceivedPacket(packetNumber protocol.PacketNumbe
 // SetLowerLimit sets a lower limit for acking packets.
 // Packets with packet numbers smaller or equal than p will not be acked.
 func (h *receivedPacketHandler) SetLowerLimit(p protocol.PacketNumber) {
+	utils.Debugf("ReceivedPacketHandler: setting lower limit: %d", p)
 	h.lowerLimit = p
 	h.packetHistory.DeleteUpTo(p)
 }

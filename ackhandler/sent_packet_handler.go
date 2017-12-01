@@ -49,7 +49,8 @@ type sentPacketHandler struct {
 
 	LargestAcked protocol.PacketNumber
 
-	largestReceivedPacketWithAck protocol.PacketNumber
+	largestReceivedPacketWithAck  protocol.PacketNumber
+	largestPacketPeerKnowsIsAcked protocol.PacketNumber
 
 	packetHistory      *PacketList
 	stopWaitingManager stopWaitingManager
@@ -128,13 +129,20 @@ func (h *sentPacketHandler) SentPacket(packet *Packet) error {
 	h.lastSentPacketNumber = packet.PacketNumber
 	now := time.Now()
 
+	var largestAcked protocol.PacketNumber
+	if ackFrame, ok := packet.Frames[0].(*wire.AckFrame); ok {
+		largestAcked = ackFrame.LargestAcked
+	}
+
 	packet.Frames = stripNonRetransmittableFrames(packet.Frames)
 	isRetransmittable := len(packet.Frames) != 0
 
 	if isRetransmittable {
-		packet.SendTime = now
+		packet.sendTime = now
+		packet.largestAcked = largestAcked
 		h.bytesInFlight += packet.Length
 		h.packetHistory.PushBack(*packet)
+		utils.Debugf("Adding to packet history: %#v\n", packet)
 		h.numNonRetransmittablePackets = 0
 	} else {
 		h.numNonRetransmittablePackets++
@@ -189,6 +197,7 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 			if encLevel < p.Value.EncryptionLevel {
 				return fmt.Errorf("Received ACK with encryption level %s that acks a packet %d (encryption level %s)", encLevel, p.Value.PacketNumber, p.Value.EncryptionLevel)
 			}
+			h.largestPacketPeerKnowsIsAcked = utils.MaxPacketNumber(h.largestPacketPeerKnowsIsAcked, p.Value.largestAcked)
 			h.onPacketAcked(p)
 			h.congestion.OnPacketAcked(p.Value.PacketNumber, p.Value.Length, h.bytesInFlight)
 		}
@@ -201,6 +210,10 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 	h.stopWaitingManager.ReceivedAck(ackFrame)
 
 	return nil
+}
+
+func (h *sentPacketHandler) GetLargestPacketPeerKnowsIsAcked() protocol.PacketNumber {
+	return h.largestPacketPeerKnowsIsAcked
 }
 
 func (h *sentPacketHandler) determineNewlyAckedPackets(ackFrame *wire.AckFrame) ([]*PacketElement, error) {
@@ -245,7 +258,7 @@ func (h *sentPacketHandler) maybeUpdateRTT(largestAcked protocol.PacketNumber, a
 	for el := h.packetHistory.Front(); el != nil; el = el.Next() {
 		packet := el.Value
 		if packet.PacketNumber == largestAcked {
-			h.rttStats.UpdateRTT(rcvTime.Sub(packet.SendTime), ackDelay, time.Now())
+			h.rttStats.UpdateRTT(rcvTime.Sub(packet.sendTime), ackDelay, time.Now())
 			return true
 		}
 		// Packets are sorted by number, so we can stop searching
@@ -290,7 +303,7 @@ func (h *sentPacketHandler) detectLostPackets() {
 			break
 		}
 
-		timeSinceSent := now.Sub(packet.SendTime)
+		timeSinceSent := now.Sub(packet.sendTime)
 		if timeSinceSent > delayUntilLost {
 			lostPackets = append(lostPackets, el)
 		} else if h.lossTime.IsZero() {

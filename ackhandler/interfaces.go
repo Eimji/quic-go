@@ -16,6 +16,7 @@ type SentPacketHandler interface {
 
 	SendingAllowed() bool
 	GetStopWaitingFrame(force bool) *wire.StopWaitingFrame
+	GetLargestPacketPeerKnowsIsAcked() protocol.PacketNumber
 	ShouldSendRetransmittablePacket() bool
 	DequeuePacketForRetransmission() (packet *Packet)
 	GetLeastUnacked() protocol.PacketNumber

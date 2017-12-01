@@ -486,9 +486,10 @@ func (s *session) handleFrames(fs []wire.Frame, encLevel protocol.EncryptionLeve
 		case *wire.GoawayFrame:
 			err = errors.New("unimplemented: handling GOAWAY frames")
 		case *wire.StopWaitingFrame:
+			// ignore STOP_WAITINGs
 			// LeastUnacked is guaranteed to have LeastUnacked > 0
 			// therefore this will never underflow
-			s.receivedPacketHandler.SetLowerLimit(frame.LeastUnacked - 1)
+			// s.receivedPacketHandler.SetLowerLimit(frame.LeastUnacked - 1)
 		case *wire.RstStreamFrame:
 			err = s.handleRstStreamFrame(frame)
 		case *wire.MaxDataFrame:
@@ -573,7 +574,11 @@ func (s *session) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
 }
 
 func (s *session) handleAckFrame(frame *wire.AckFrame, encLevel protocol.EncryptionLevel) error {
-	return s.sentPacketHandler.ReceivedAck(frame, s.lastRcvdPacketNumber, encLevel, s.lastNetworkActivityTime)
+	if err := s.sentPacketHandler.ReceivedAck(frame, s.lastRcvdPacketNumber, encLevel, s.lastNetworkActivityTime); err != nil {
+		return err
+	}
+	s.receivedPacketHandler.SetLowerLimit(s.sentPacketHandler.GetLargestPacketPeerKnowsIsAcked())
+	return nil
 }
 
 func (s *session) closeLocal(e error) {
