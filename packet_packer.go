@@ -27,11 +27,12 @@ type packetPacker struct {
 	packetNumberGenerator *packetNumberGenerator
 	streamFramer          *streamFramer
 
-	controlFrames    []wire.Frame
-	stopWaiting      *wire.StopWaitingFrame
-	ackFrame         *wire.AckFrame
-	leastUnacked     protocol.PacketNumber
-	omitConnectionID bool
+	controlFrames                 []wire.Frame
+	stopWaiting                   *wire.StopWaitingFrame
+	ackFrame                      *wire.AckFrame
+	makeNextPacketRetransmittable bool
+	leastUnacked                  protocol.PacketNumber
+	omitConnectionID              bool
 }
 
 func newPacketPacker(connectionID protocol.ConnectionID,
@@ -145,6 +146,14 @@ func (p *packetPacker) PackPacket() (*packedPacket, error) {
 	// Don't send out packets that only contain a StopWaitingFrame
 	if len(payloadFrames) == 1 && p.stopWaiting != nil {
 		return nil, nil
+	}
+	if (len(payloadFrames) == 1 && p.ackFrame != nil) || (len(payloadFrames) == 2 && p.ackFrame != nil && p.stopWaiting != nil) { // check if this packet only contains an ACK and / or STOP_WAITING
+		if p.makeNextPacketRetransmittable {
+			payloadFrames = append(payloadFrames, &wire.PingFrame{})
+			p.makeNextPacketRetransmittable = false
+		}
+	} else { // this packet already contains a retransmittable frame. No need to send a PING
+		p.makeNextPacketRetransmittable = false
 	}
 	p.stopWaiting = nil
 	p.ackFrame = nil
@@ -347,4 +356,8 @@ func (p *packetPacker) SetLeastUnacked(leastUnacked protocol.PacketNumber) {
 
 func (p *packetPacker) SetOmitConnectionID() {
 	p.omitConnectionID = true
+}
+
+func (p *packetPacker) MakeNextPacketRetransmittable() {
+	p.makeNextPacketRetransmittable = true
 }
