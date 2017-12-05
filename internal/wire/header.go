@@ -68,23 +68,12 @@ func ParseHeaderSentByClient(b *bytes.Reader) (*Header, error) {
 	// If this is a gQUIC header 0x80 will be set to 0 and 0x40 is for spin bit. == 0*|******
 	// If this is an IETF QUIC header there are two options:
 	// * either 0x80 will be 1 (for the Long Header) == 1|*******
-	// * or 0x40 (the Connection ID Flag) will be 0 (for the Short Header), since we don't the client to omit it == 00|******
+	// * or 0x40 (the Connection ID Flag) will be 0 (for the Short Header), since we don't want the client to omit it == 00|******
 	// 11000000 & typeByte == 00|****** => 0
 	//isPublicHeader := typeByte&0xc0 == 0
 	isPublicHeader := typeByte&0xa0 == 0 || typeByte&0xa8 == 0x28
 	/* 10100000 => 00000000 */
 	/* 10101000 => 00101000 */
-	/*var isPublicHeader bool
-
-	if typeByte&0x80 != 0 {
-		isPublicHeader = false
-	} else if typeByte&0x20 == 0 {
-		isPublicHeader = true
-	} else if typeByte&0x8 == 0 {
-		isPublicHeader = false
-	} else {
-		isPublicHeader = true
-	}*/
 
 	return parsePacketHeader(b, protocol.PerspectiveClient, isPublicHeader)
 }
