@@ -438,6 +438,14 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 		hdr.PacketNumber,
 	)
 
+	if hdr.PacketNumber >= s.largestRcvdPacketNumber {
+		if s.perspective == protocol.PerspectiveServer {
+			s.packer.SetSpinBit(hdr.SpinBit)
+		} else {
+			s.packer.SetSpinBit(!hdr.SpinBit)
+		}
+	}
+
 	packet, err := s.unpacker.Unpack(hdr.Raw, hdr, data)
 	if utils.Debug() {
 		if err != nil {

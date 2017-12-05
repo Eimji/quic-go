@@ -21,6 +21,7 @@ var _ = Describe("Public Header", func() {
 			b := bytes.NewReader(append(append([]byte{0x09, 0x4c, 0xfa, 0x9f, 0x9b, 0x66, 0x86, 0x19, 0xf6}, ver...), 0x01))
 			hdr, err := parsePublicHeader(b, protocol.PerspectiveClient)
 			Expect(err).ToNot(HaveOccurred())
+			Expect(hdr.SpinBit).To(BeFalse())
 			Expect(hdr.VersionFlag).To(BeTrue())
 			Expect(hdr.ResetFlag).To(BeFalse())
 			Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x4cfa9f9b668619f6)))
@@ -36,7 +37,7 @@ var _ = Describe("Public Header", func() {
 			Expect(err).To(MatchError(errReceivedOmittedConnectionID))
 		})
 
-		It("accepts aan d connection ID as a client", func() {
+		It("accepts an d connection ID as a client", func() {
 			b := bytes.NewReader([]byte{0x00, 0x01})
 			hdr, err := parsePublicHeader(b, protocol.PerspectiveServer)
 			Expect(err).ToNot(HaveOccurred())
@@ -495,12 +496,13 @@ var _ = Describe("Public Header", func() {
 
 		It("logs a Public Header containing a connection ID", func() {
 			(&Header{
+				SpinBit:         true,
 				ConnectionID:    0xdecafbad,
 				PacketNumber:    0x1337,
 				PacketNumberLen: 6,
 				Version:         protocol.Version39,
 			}).logPublicHeader()
-			Expect(string(buf.Bytes())).To(ContainSubstring("Public Header{ConnectionID: 0xdecafbad, PacketNumber: 0x1337, PacketNumberLen: 6, Version: gQUIC 39"))
+			Expect(string(buf.Bytes())).To(ContainSubstring("Public Header{Spin bit: 1, ConnectionID: 0xdecafbad, PacketNumber: 0x1337, PacketNumberLen: 6, Version: gQUIC 39"))
 		})
 
 		It("logs a Public Header with omitted connection ID", func() {
@@ -510,7 +512,7 @@ var _ = Describe("Public Header", func() {
 				PacketNumberLen:  6,
 				Version:          protocol.Version39,
 			}).logPublicHeader()
-			Expect(string(buf.Bytes())).To(ContainSubstring("Public Header{ConnectionID: (omitted)"))
+			Expect(string(buf.Bytes())).To(ContainSubstring("Public Header{Spin bit: 0, ConnectionID: (omitted)"))
 		})
 
 		It("logs a Public Header without a version", func() {

@@ -32,6 +32,7 @@ type packetPacker struct {
 	ackFrame         *wire.AckFrame
 	leastUnacked     protocol.PacketNumber
 	omitConnectionID bool
+	spinBit          bool
 }
 
 func newPacketPacker(connectionID protocol.ConnectionID,
@@ -274,6 +275,7 @@ func (p *packetPacker) getHeader(encLevel protocol.EncryptionLevel) *wire.Header
 	}
 
 	header := &wire.Header{
+		SpinBit:         p.spinBit,
 		ConnectionID:    p.connectionID,
 		PacketNumber:    pnum,
 		PacketNumberLen: packetNumberLen,
@@ -347,4 +349,8 @@ func (p *packetPacker) SetLeastUnacked(leastUnacked protocol.PacketNumber) {
 
 func (p *packetPacker) SetOmitConnectionID() {
 	p.omitConnectionID = true
+}
+
+func (p *packetPacker) SetSpinBit(value bool) {
+	p.spinBit = value
 }

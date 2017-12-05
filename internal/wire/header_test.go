@@ -69,6 +69,7 @@ var _ = Describe("Header", func() {
 		It("parses a gQUIC Public Header, when the version is not known", func() {
 			buf := &bytes.Buffer{}
 			err := (&Header{
+				SpinBit:         true,
 				VersionFlag:     true,
 				Version:         versionPublicHeader,
 				ConnectionID:    0x42,

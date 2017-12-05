@@ -69,7 +69,7 @@ func parseLongHeader(b *bytes.Reader, sentBy protocol.Perspective, typeByte byte
 }
 
 func parseShortHeader(b *bytes.Reader, typeByte byte) (*Header, error) {
-	hasConnID := typeByte&0x40 > 0
+	hasConnID := typeByte&0x20 > 0
 	var connID uint64
 	if hasConnID {
 		var err error
@@ -84,7 +84,8 @@ func parseShortHeader(b *bytes.Reader, typeByte byte) (*Header, error) {
 		return nil, err
 	}
 	return &Header{
-		KeyPhase:         int(typeByte&0x20) >> 5,
+		SpinBit:          typeByte&0x40 != 0,
+		KeyPhase:         int(typeByte&0x10) >> 4,
 		OmitConnectionID: !hasConnID,
 		ConnectionID:     protocol.ConnectionID(connID),
 		PacketNumber:     protocol.PacketNumber(pn),
@@ -110,9 +111,12 @@ func (h *Header) writeLongHeader(b *bytes.Buffer) error {
 }
 
 func (h *Header) writeShortHeader(b *bytes.Buffer) error {
-	typeByte := byte(h.KeyPhase << 5)
-	if !h.OmitConnectionID {
+	typeByte := byte(h.KeyPhase << 4)
+	if h.SpinBit {
 		typeByte ^= 0x40
+	}
+	if !h.OmitConnectionID {
+		typeByte ^= 0x20
 	}
 	switch h.PacketNumberLen {
 	case protocol.PacketNumberLen1:
@@ -165,6 +169,7 @@ func (h *Header) logHeader() {
 		if !h.OmitConnectionID {
 			connID = fmt.Sprintf("%#x", h.ConnectionID)
 		}
-		utils.Debugf("   Short Header{ConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, KeyPhase: %d}", connID, h.PacketNumber, h.PacketNumberLen, h.KeyPhase)
+		var b2i = map[bool]int{false: 0, true: 1}
+		utils.Debugf("   Short Header{Spin bit: %d, ConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, KeyPhase: %d}", b2i[h.SpinBit], connID, h.PacketNumber, h.PacketNumberLen, h.KeyPhase)
 	}
 }

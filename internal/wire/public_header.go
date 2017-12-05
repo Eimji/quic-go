@@ -25,32 +25,35 @@ func (h *Header) writePublicHeader(b *bytes.Buffer, pers protocol.Perspective, v
 	}
 
 	publicFlagByte := uint8(0x00)
+	if h.SpinBit {
+		publicFlagByte |= 0x40
+	}
 	if h.VersionFlag {
-		publicFlagByte |= 0x01
+		publicFlagByte |= 0x01 /* 00000001 */
 	}
 	if h.ResetFlag {
-		publicFlagByte |= 0x02
+		publicFlagByte |= 0x02 /* 00000010 */
 	}
 	if !h.OmitConnectionID {
-		publicFlagByte |= 0x08
+		publicFlagByte |= 0x08 /* 00001000 */
 	}
 	if len(h.DiversificationNonce) > 0 {
 		if len(h.DiversificationNonce) != 32 {
 			return errors.New("invalid diversification nonce length")
 		}
-		publicFlagByte |= 0x04
+		publicFlagByte |= 0x04 /* 00000100 */
 	}
 	// only set PacketNumberLen bits if a packet number will be written
 	if h.hasPacketNumber(pers) {
 		switch h.PacketNumberLen {
 		case protocol.PacketNumberLen1:
-			publicFlagByte |= 0x00
+			publicFlagByte |= 0x00 /* 00|00|0000 */
 		case protocol.PacketNumberLen2:
-			publicFlagByte |= 0x10
+			publicFlagByte |= 0x10 /* 00|01|0000 */
 		case protocol.PacketNumberLen4:
-			publicFlagByte |= 0x20
+			publicFlagByte |= 0x20 /* 00|10|0000 */
 		case protocol.PacketNumberLen6:
-			publicFlagByte |= 0x30
+			publicFlagByte |= 0x30 /* 00|11|0000 */
 		}
 	}
 	b.WriteByte(publicFlagByte)
@@ -95,6 +98,7 @@ func parsePublicHeader(b *bytes.Reader, packetSentBy protocol.Perspective) (*Hea
 	if err != nil {
 		return nil, err
 	}
+	header.SpinBit = publicFlagByte&0x40 > 0
 	header.ResetFlag = publicFlagByte&0x02 > 0
 	header.VersionFlag = publicFlagByte&0x01 > 0
 
@@ -237,5 +241,6 @@ func (h *Header) logPublicHeader() {
 	if h.Version != 0 {
 		ver = fmt.Sprintf("%s", h.Version)
 	}
-	utils.Debugf("   Public Header{ConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, Version: %s, DiversificationNonce: %#v}", connID, h.PacketNumber, h.PacketNumberLen, ver, h.DiversificationNonce)
+	var b2i = map[bool]int{false: 0, true: 1}
+	utils.Debugf("   Public Header{Spin bit: %d, ConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, Version: %s, DiversificationNonce: %#v}", b2i[h.SpinBit], connID, h.PacketNumber, h.PacketNumberLen, ver, h.DiversificationNonce)
 }

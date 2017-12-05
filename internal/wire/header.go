@@ -10,6 +10,7 @@ import (
 // It contains fields that are only needed for the gQUIC Public Header and the IETF draft Header.
 type Header struct {
 	Raw               []byte
+	SpinBit           bool
 	ConnectionID      protocol.ConnectionID
 	OmitConnectionID  bool
 	PacketNumberLen   protocol.PacketNumberLen
@@ -41,9 +42,11 @@ func ParseHeaderSentByServer(b *bytes.Reader, version protocol.VersionNumber) (*
 
 	var isPublicHeader bool
 	// As a client, we know the version of the packet that the server sent, except for Version Negotiation Packets.
-	if typeByte == 0x81 { // IETF draft Version Negotiation Packet
+	if typeByte == 0x81 { // IETF draft Version Negotiation Packet == |1|0000001
 		isPublicHeader = false
-	} else if typeByte&0xcf == 0x9 { // gQUIC Version Negotiation Packet
+		//} else if typeByte&0xcf == 0x9 { // gQUIC Version Negotiation Packet 11001111 & typeByte== 00|**|1001 => 00001001 (0x9)
+	} else if typeByte&0x8f == 0x9 {
+		/* tiquic 10001111 & typeByte== 0*|**|1001 => 00001001 (0x9) */
 		// IETF QUIC Version Negotiation Packets are sent with the Long Header (indicated by the 0x80 bit)
 		// gQUIC always has 0x80 unset
 		isPublicHeader = true
@@ -62,11 +65,26 @@ func ParseHeaderSentByClient(b *bytes.Reader) (*Header, error) {
 	}
 	_ = b.UnreadByte() // unread the type byte
 
-	// If this is a gQUIC header 0x80 and 0x40 will be set to 0.
+	// If this is a gQUIC header 0x80 will be set to 0 and 0x40 is for spin bit. == 0*|******
 	// If this is an IETF QUIC header there are two options:
-	// * either 0x80 will be 1 (for the Long Header)
-	// * or 0x40 (the Connection ID Flag) will be 0 (for the Short Header), since we don't the client to omit it
-	isPublicHeader := typeByte&0xc0 == 0
+	// * either 0x80 will be 1 (for the Long Header) == 1|*******
+	// * or 0x40 (the Connection ID Flag) will be 0 (for the Short Header), since we don't the client to omit it == 00|******
+	// 11000000 & typeByte == 00|****** => 0
+	//isPublicHeader := typeByte&0xc0 == 0
+	isPublicHeader := typeByte&0xa0 == 0 || typeByte&0xa8 == 0x28
+	/* 10100000 => 00000000 */
+	/* 10101000 => 00101000 */
+	/*var isPublicHeader bool
+
+	if typeByte&0x80 != 0 {
+		isPublicHeader = false
+	} else if typeByte&0x20 == 0 {
+		isPublicHeader = true
+	} else if typeByte&0x8 == 0 {
+		isPublicHeader = false
+	} else {
+		isPublicHeader = true
+	}*/
 
 	return parsePacketHeader(b, protocol.PerspectiveClient, isPublicHeader)
 }
@@ -81,6 +99,7 @@ func parsePacketHeader(b *bytes.Reader, sentBy protocol.Perspective, isPublicHea
 		hdr.isPublicHeader = true // save that this is a Public Header, so we can log it correctly later
 		return hdr, nil
 	}
+	//this is IETF header
 	return parseHeader(b, sentBy)
 }
 
