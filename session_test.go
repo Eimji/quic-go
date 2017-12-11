@@ -130,7 +130,7 @@ func (m *mockReceivedPacketHandler) GetAckFrame() *wire.AckFrame {
 func (m *mockReceivedPacketHandler) ReceivedPacket(packetNumber protocol.PacketNumber, shouldInstigateAck bool) error {
 	panic("not implemented")
 }
-func (m *mockReceivedPacketHandler) SetLowerLimit(protocol.PacketNumber) {
+func (m *mockReceivedPacketHandler) IgnoreBelow(protocol.PacketNumber) {
 	panic("not implemented")
 }
 func (m *mockReceivedPacketHandler) GetAlarmTimeout() time.Time { return m.ackAlarm }
@@ -145,12 +145,11 @@ func areSessionsRunning() bool {
 
 var _ = Describe("Session", func() {
 	var (
-		sess          *session
-		scfg          *handshake.ServerConfig
-		mconn         *mockConnection
-		cryptoSetup   *mockCryptoSetup
-		handshakeChan <-chan handshakeEvent
-		aeadChanged   chan<- protocol.EncryptionLevel
+		sess        *session
+		scfg        *handshake.ServerConfig
+		mconn       *mockConnection
+		cryptoSetup *mockCryptoSetup
+		aeadChanged chan<- protocol.EncryptionLevel
 	)
 
 	BeforeEach(func() {
@@ -180,7 +179,7 @@ var _ = Describe("Session", func() {
 		scfg, err = handshake.NewServerConfig(kex, certChain)
 		Expect(err).NotTo(HaveOccurred())
 		var pSess Session
-		pSess, handshakeChan, err = newSession(
+		pSess, err = newSession(
 			mconn,
 			protocol.Version39,
 			0,
@@ -229,7 +228,7 @@ var _ = Describe("Session", func() {
 				paramCookie = cookie
 				return false
 			}
-			pSess, _, err := newSession(
+			pSess, err := newSession(
 				mconn,
 				protocol.Version39,
 				0,
@@ -469,9 +468,6 @@ var _ = Describe("Session", func() {
 		})
 
 		It("handles CONNECTION_CLOSE frames", func() {
-			cryptoStream := mocks.NewMockStreamI(mockCtrl)
-			cryptoStream.EXPECT().Cancel(gomock.Any())
-			sess.cryptoStream = cryptoStream
 			done := make(chan struct{})
 			go func() {
 				defer GinkgoRecover()
@@ -739,16 +735,17 @@ var _ = Describe("Session", func() {
 		})
 
 		Context("updating the remote address", func() {
-			It("sets the remote address", func() {
+			It("doesn't support connection migration", func() {
+				origAddr := sess.conn.(*mockConnection).remoteAddr
 				remoteIP := &net.IPAddr{IP: net.IPv4(192, 168, 0, 100)}
-				Expect(sess.conn.(*mockConnection).remoteAddr).ToNot(Equal(remoteIP))
+				Expect(origAddr).ToNot(Equal(remoteIP))
 				p := receivedPacket{
 					remoteAddr: remoteIP,
 					header:     &wire.Header{PacketNumber: 1337},
 				}
 				err := sess.handlePacketImpl(&p)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sess.conn.(*mockConnection).remoteAddr).To(Equal(remoteIP))
+				Expect(sess.conn.(*mockConnection).remoteAddr).To(Equal(origAddr))
 			})
 
 			It("doesn't change the remote address if authenticating the packet fails", func() {
@@ -767,28 +764,19 @@ var _ = Describe("Session", func() {
 				Expect(quicErr.ErrorCode).To(Equal(qerr.DecryptionFailure))
 				Expect(sess.conn.(*mockConnection).remoteAddr).To(Equal(remoteIP))
 			})
-
-			It("sets the remote address, if the packet is authenticated, but unpacking fails for another reason", func() {
-				testErr := errors.New("testErr")
-				remoteIP := &net.IPAddr{IP: net.IPv4(192, 168, 0, 100)}
-				Expect(sess.conn.(*mockConnection).remoteAddr).ToNot(Equal(remoteIP))
-				p := receivedPacket{
-					remoteAddr: remoteIP,
-					header:     &wire.Header{PacketNumber: 1337},
-				}
-				sess.unpacker.(*mockUnpacker).unpackErr = testErr
-				err := sess.handlePacketImpl(&p)
-				Expect(err).To(MatchError(testErr))
-				Expect(sess.conn.(*mockConnection).remoteAddr).To(Equal(remoteIP))
-			})
 		})
 	})
 
 	Context("sending packets", func() {
+		BeforeEach(func() {
+			sess.packer.hasSentPacket = true // make sure this is not the first packet the packer sends
+		})
+
 		It("sends ACK frames", func() {
 			packetNumber := protocol.PacketNumber(0x035e)
-			sess.receivedPacketHandler.ReceivedPacket(packetNumber, true)
-			err := sess.sendPacket()
+			err := sess.receivedPacketHandler.ReceivedPacket(packetNumber, true)
+			Expect(err).ToNot(HaveOccurred())
+			err = sess.sendPacket()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mconn.written).To(HaveLen(1))
 			Expect(mconn.written).To(Receive(ContainSubstring(string([]byte{0x03, 0x5e}))))
@@ -872,6 +860,7 @@ var _ = Describe("Session", func() {
 		BeforeEach(func() {
 			// a StopWaitingFrame is added, so make sure the packet number of the new package is higher than the packet number of the retransmitted packet
 			sess.packer.packetNumberGenerator.next = 0x1337 + 10
+			sess.packer.hasSentPacket = true // make sure this is not the first packet the packer sends
 			sph = newMockSentPacketHandler().(*mockSentPacketHandler)
 			sess.sentPacketHandler = sph
 			sess.packer.cryptoSetup = &mockCryptoSetup{encLevelSeal: protocol.EncryptionForwardSecure}
@@ -995,6 +984,7 @@ var _ = Describe("Session", func() {
 	})
 
 	It("retransmits RTO packets", func() {
+		sess.packer.hasSentPacket = true // make sure this is not the first packet the packer sends
 		sess.sentPacketHandler.SetHandshakeComplete()
 		n := protocol.PacketNumber(10)
 		sess.packer.cryptoSetup = &mockCryptoSetup{encLevelSeal: protocol.EncryptionForwardSecure}
@@ -1022,6 +1012,7 @@ var _ = Describe("Session", func() {
 
 	Context("scheduling sending", func() {
 		BeforeEach(func() {
+			sess.packer.hasSentPacket = true // make sure this is not the first packet the packer sends
 			sess.processTransportParameters(&handshake.TransportParameters{
 				StreamFlowControlWindow:     protocol.MaxByteCount,
 				ConnectionFlowControlWindow: protocol.MaxByteCount,
@@ -1161,6 +1152,8 @@ var _ = Describe("Session", func() {
 			sendUndecryptablePackets()
 			sess.scheduleSending()
 			Consistently(mconn.written).Should(HaveLen(0))
+			Expect(sess.Close(nil)).To(Succeed())
+			Eventually(sess.Context().Done()).Should(BeClosed())
 		})
 
 		It("sets a deadline to send a Public Reset after receiving too many undecryptable packets", func() {
@@ -1168,6 +1161,7 @@ var _ = Describe("Session", func() {
 			sendUndecryptablePackets()
 			Eventually(func() time.Time { return sess.receivedTooManyUndecrytablePacketsTime }).Should(BeTemporally("~", time.Now(), 20*time.Millisecond))
 			sess.Close(nil)
+			Eventually(sess.Context().Done()).Should(BeClosed())
 		})
 
 		It("drops undecryptable packets when the undecrytable packet queue is full", func() {
@@ -1176,13 +1170,15 @@ var _ = Describe("Session", func() {
 			Eventually(func() []*receivedPacket { return sess.undecryptablePackets }).Should(HaveLen(protocol.MaxUndecryptablePackets))
 			// check that old packets are kept, and the new packets are dropped
 			Expect(sess.undecryptablePackets[0].header.PacketNumber).To(Equal(protocol.PacketNumber(1)))
-			sess.Close(nil)
+			Expect(sess.Close(nil)).To(Succeed())
+			Eventually(sess.Context().Done()).Should(BeClosed())
 		})
 
 		It("sends a Public Reset after a timeout", func() {
+			Expect(sess.receivedTooManyUndecrytablePacketsTime).To(BeZero())
 			go sess.run()
 			sendUndecryptablePackets()
-			Eventually(func() time.Time { return sess.receivedTooManyUndecrytablePacketsTime }).Should(BeTemporally("~", time.Now(), 10*time.Millisecond))
+			Eventually(func() time.Time { return sess.receivedTooManyUndecrytablePacketsTime }).Should(BeTemporally("~", time.Now(), time.Second))
 			// speed up this test by manually setting back the time when too many packets were received
 			sess.receivedTooManyUndecrytablePacketsTime = time.Now().Add(-protocol.PublicResetTimeout)
 			time.Sleep(10 * time.Millisecond) // wait for the run loop to spin up
@@ -1200,7 +1196,8 @@ var _ = Describe("Session", func() {
 			// in reality, this happens when the trial decryption succeeded during the Public Reset timeout
 			Consistently(mconn.written).ShouldNot(HaveLen(1))
 			Expect(sess.Context().Done()).ToNot(Receive())
-			sess.Close(nil)
+			Expect(sess.Close(nil)).To(Succeed())
+			Eventually(sess.Context().Done()).Should(BeClosed())
 		})
 
 		It("ignores undecryptable packets after the handshake is complete", func() {
@@ -1209,6 +1206,7 @@ var _ = Describe("Session", func() {
 			sendUndecryptablePackets()
 			Consistently(sess.undecryptablePackets).Should(BeEmpty())
 			Expect(sess.Close(nil)).To(Succeed())
+			Eventually(sess.Context().Done()).Should(BeClosed())
 		})
 
 		It("unqueues undecryptable packets for later decryption", func() {
@@ -1225,7 +1223,7 @@ var _ = Describe("Session", func() {
 	It("send a handshake event on the handshakeChan when the AEAD changes to secure", func(done Done) {
 		go sess.run()
 		aeadChanged <- protocol.EncryptionSecure
-		Eventually(handshakeChan).Should(Receive(&handshakeEvent{encLevel: protocol.EncryptionSecure}))
+		Eventually(sess.handshakeStatus()).Should(Receive(&handshakeEvent{encLevel: protocol.EncryptionSecure}))
 		Expect(sess.Close(nil)).To(Succeed())
 		close(done)
 	})
@@ -1233,7 +1231,7 @@ var _ = Describe("Session", func() {
 	It("send a handshake event on the handshakeChan when the AEAD changes to forward-secure", func(done Done) {
 		go sess.run()
 		aeadChanged <- protocol.EncryptionForwardSecure
-		Eventually(handshakeChan).Should(Receive(&handshakeEvent{encLevel: protocol.EncryptionForwardSecure}))
+		Eventually(sess.handshakeStatus()).Should(Receive(&handshakeEvent{encLevel: protocol.EncryptionForwardSecure}))
 		Expect(sess.Close(nil)).To(Succeed())
 		close(done)
 	})
@@ -1241,7 +1239,7 @@ var _ = Describe("Session", func() {
 	It("closes the handshakeChan when the handshake completes", func(done Done) {
 		go sess.run()
 		close(aeadChanged)
-		Eventually(handshakeChan).Should(BeClosed())
+		Eventually(sess.handshakeStatus()).Should(BeClosed())
 		Expect(sess.Close(nil)).To(Succeed())
 		close(done)
 	})
@@ -1250,7 +1248,7 @@ var _ = Describe("Session", func() {
 		testErr := errors.New("handshake error")
 		go sess.run()
 		Expect(sess.Close(nil)).To(Succeed())
-		Expect(handshakeChan).To(Receive(&handshakeEvent{err: testErr}))
+		Expect(sess.handshakeStatus()).To(Receive(&handshakeEvent{err: testErr}))
 		close(done)
 	})
 
@@ -1298,6 +1296,7 @@ var _ = Describe("Session", func() {
 			sess.handshakeComplete = true
 			sess.config.KeepAlive = true
 			sess.lastNetworkActivityTime = time.Now().Add(-remoteIdleTimeout / 2)
+			sess.packer.hasSentPacket = true // make sure this is not the first packet the packer sends
 			go sess.run()
 			defer sess.Close(nil)
 			var data []byte
@@ -1435,9 +1434,9 @@ var _ = Describe("Session", func() {
 			for i := 2; i <= 1000; i++ {
 				s, err := sess.GetOrOpenStream(protocol.StreamID(i*2 + 1))
 				Expect(err).NotTo(HaveOccurred())
-				err = s.Close()
-				Expect(err).NotTo(HaveOccurred())
-				s.(*stream).SentFin()
+				Expect(s.Close()).To(Succeed())
+				_, sentFin := s.(*stream).GetDataForWriting(1000) // trigger "sending" of the FIN bit
+				Expect(sentFin).To(BeTrue())
 				s.(*stream).CloseRemote(0)
 				_, err = s.Read([]byte("a"))
 				Expect(err).To(MatchError(io.EOF))
@@ -1530,7 +1529,7 @@ var _ = Describe("Client Session", func() {
 		}
 
 		mconn = newMockConnection()
-		sessP, _, err := newClientSession(
+		sessP, err := newClientSession(
 			mconn,
 			"hostname",
 			protocol.Version39,
@@ -1558,7 +1557,10 @@ var _ = Describe("Client Session", func() {
 		})
 
 		It("passes the diversification nonce to the cryptoSetup", func() {
-			go sess.run()
+			go func() {
+				defer GinkgoRecover()
+				sess.run()
+			}()
 			hdr.PacketNumber = 5
 			hdr.DiversificationNonce = []byte("foobar")
 			err := sess.handlePacketImpl(&receivedPacket{header: hdr})

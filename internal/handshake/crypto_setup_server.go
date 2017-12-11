@@ -431,7 +431,7 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 	replyMap := h.params.getHelloMap()
 	// add crypto parameters
 	verTag := &bytes.Buffer{}
-	for _, v := range h.supportedVersions {
+	for _, v := range protocol.GetGreasedVersions(h.supportedVersions) {
 		utils.BigEndian.WriteUint32(verTag, uint32(v))
 	}
 	replyMap[TagPUBS] = ephermalKex.PublicKey()
@@ -455,10 +455,6 @@ func (h *cryptoSetupServer) DiversificationNonce() []byte {
 }
 
 func (h *cryptoSetupServer) SetDiversificationNonce(data []byte) {
-	panic("not needed for cryptoSetupServer")
-}
-
-func (h *cryptoSetupServer) GetNextPacketType() protocol.PacketType {
 	panic("not needed for cryptoSetupServer")
 }
 

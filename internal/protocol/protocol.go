@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"fmt"
-	"math"
 )
 
 // A PacketNumber in QUIC
@@ -28,22 +27,18 @@ const (
 type PacketType uint8
 
 const (
-	// PacketTypeVersionNegotiation is the packet type of a Version Negotiation packet
-	PacketTypeVersionNegotiation PacketType = 1
 	// PacketTypeInitial is the packet type of a Initial packet
-	PacketTypeInitial PacketType = 2
+	PacketTypeInitial PacketType = 0 // 2
 	// PacketTypeRetry is the packet type of a Retry packet
-	PacketTypeRetry PacketType = 3
+	PacketTypeRetry PacketType = 1 // 3
 	// PacketTypeHandshake is the packet type of a Cleartext packet
-	PacketTypeHandshake PacketType = 4
+	PacketTypeHandshake PacketType = 2 // 4
 	// PacketType0RTT is the packet type of a 0-RTT packet
-	PacketType0RTT PacketType = 5
+	PacketType0RTT PacketType = 3 // 5
 )
 
 func (t PacketType) String() string {
 	switch t {
-	case PacketTypeVersionNegotiation:
-		return "Version Negotiation"
 	case PacketTypeInitial:
 		return "Initial"
 	case PacketTypeRetry:
@@ -61,13 +56,13 @@ func (t PacketType) String() string {
 type ConnectionID uint64
 
 // A StreamID in QUIC
-type StreamID uint32
+type StreamID uint64
 
 // A ByteCount in QUIC
 type ByteCount uint64
 
 // MaxByteCount is the maximum value of a ByteCount
-const MaxByteCount = ByteCount(math.MaxUint64)
+const MaxByteCount = ByteCount(1<<62 - 1)
 
 // MaxReceivePacketSize maximum packet size of any QUIC packet, based on
 // ethernet's max size, minus the IP and UDP headers. IPv6 has a 40 byte header,

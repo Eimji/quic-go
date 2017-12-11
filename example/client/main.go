@@ -13,7 +13,9 @@ import (
 	"runtime"
 	"sync"
 
+	quic "github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/h2quic"
+	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
@@ -29,6 +31,7 @@ func getBuildDir() string {
 func main() {
 	verbose := flag.Bool("v", false, "verbose")
 	certPath := flag.String("cert", getBuildDir(), "certificate directory")
+	tls := flag.Bool("tls", false, "activate support for IETF QUIC (work in progress)")
 	flag.Parse()
 	urls := flag.Args()
 
@@ -55,8 +58,16 @@ func main() {
 	}
 	tlsConfig.BuildNameToCertificate()
 
+	versions := protocol.SupportedVersions
+	if *tls {
+		versions = append([]protocol.VersionNumber{protocol.VersionTLS}, versions...)
+	}
+
 	hclient := &http.Client{
-		Transport: &h2quic.RoundTripper{TLSClientConfig: tlsConfig},
+		Transport: &h2quic.RoundTripper{
+			QuicConfig:      &quic.Config{Versions: versions},
+			TLSClientConfig: tlsConfig,
+		},
 	}
 
 	var wg sync.WaitGroup

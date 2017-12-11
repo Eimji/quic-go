@@ -21,12 +21,9 @@ func parseHeader(b *bytes.Reader, packetSentBy protocol.Perspective) (*Header, e
 	return parseShortHeader(b, typeByte)
 }
 
+// parse long header and version negotiation packets
 func parseLongHeader(b *bytes.Reader, sentBy protocol.Perspective, typeByte byte) (*Header, error) {
 	connID, err := utils.BigEndian.ReadUint64(b)
-	if err != nil {
-		return nil, err
-	}
-	pn, err := utils.BigEndian.ReadUint32(b)
 	if err != nil {
 		return nil, err
 	}
@@ -34,28 +31,24 @@ func parseLongHeader(b *bytes.Reader, sentBy protocol.Perspective, typeByte byte
 	if err != nil {
 		return nil, err
 	}
-	packetType := protocol.PacketType(typeByte & 0x7f)
-	if sentBy == protocol.PerspectiveClient && (packetType != protocol.PacketTypeInitial && packetType != protocol.PacketTypeHandshake && packetType != protocol.PacketType0RTT) {
-		if packetType == protocol.PacketTypeVersionNegotiation {
-			return nil, qerr.Error(qerr.InvalidVersionNegotiationPacket, "sent by the client")
-		}
-		return nil, qerr.Error(qerr.InvalidPacketHeader, fmt.Sprintf("Received packet with invalid packet type: %d", packetType))
-	}
-	if sentBy == protocol.PerspectiveServer && (packetType != protocol.PacketTypeVersionNegotiation && packetType != protocol.PacketTypeRetry && packetType != protocol.PacketTypeHandshake) {
-		return nil, qerr.Error(qerr.InvalidPacketHeader, fmt.Sprintf("Received packet with invalid packet type: %d", packetType))
+	pn, err := utils.BigEndian.ReadUint32(b)
+	if err != nil {
+		return nil, err
 	}
 	h := &Header{
-		Type:            packetType,
-		IsLongHeader:    true,
 		ConnectionID:    protocol.ConnectionID(connID),
 		PacketNumber:    protocol.PacketNumber(pn),
 		PacketNumberLen: protocol.PacketNumberLen4,
 		Version:         protocol.VersionNumber(v),
 	}
-	if h.Type == protocol.PacketTypeVersionNegotiation {
+	if v == 0 { // version negotiation packet
+		if sentBy == protocol.PerspectiveClient {
+			return nil, qerr.InvalidVersion
+		}
 		if b.Len() == 0 {
 			return nil, qerr.Error(qerr.InvalidVersionNegotiationPacket, "empty version list")
 		}
+		h.IsVersionNegotiation = true
 		h.SupportedVersions = make([]protocol.VersionNumber, b.Len()/4)
 		for i := 0; b.Len() > 0; i++ {
 			v, err := utils.BigEndian.ReadUint32(b)
@@ -64,12 +57,21 @@ func parseLongHeader(b *bytes.Reader, sentBy protocol.Perspective, typeByte byte
 			}
 			h.SupportedVersions[i] = protocol.VersionNumber(v)
 		}
+		return h, nil
+	}
+	h.IsLongHeader = true
+	h.Type = protocol.PacketType(typeByte ^ 0xff)
+	if sentBy == protocol.PerspectiveClient && (h.Type != protocol.PacketTypeInitial && h.Type != protocol.PacketTypeHandshake && h.Type != protocol.PacketType0RTT) {
+		return nil, qerr.Error(qerr.InvalidPacketHeader, fmt.Sprintf("Received packet with invalid packet type: %d", h.Type))
+	}
+	if sentBy == protocol.PerspectiveServer && (h.Type != protocol.PacketTypeRetry && h.Type != protocol.PacketTypeHandshake) {
+		return nil, qerr.Error(qerr.InvalidPacketHeader, fmt.Sprintf("Received packet with invalid packet type: %d", h.Type))
 	}
 	return h, nil
 }
 
 func parseShortHeader(b *bytes.Reader, typeByte byte) (*Header, error) {
-	hasConnID := typeByte&0x20 > 0
+	hasConnID := typeByte&0x40 > 0
 	var connID uint64
 	if hasConnID {
 		var err error
@@ -78,14 +80,14 @@ func parseShortHeader(b *bytes.Reader, typeByte byte) (*Header, error) {
 			return nil, err
 		}
 	}
-	pnLen := 1 << ((typeByte & 0x3) - 1)
+	pnLen := 1 << ((typeByte & 0xF) ^ 0xF)
 	pn, err := utils.BigEndian.ReadUintN(b, uint8(pnLen))
 	if err != nil {
 		return nil, err
 	}
 	return &Header{
-		SpinBit:          typeByte&0x40 != 0,
-		KeyPhase:         int(typeByte&0x10) >> 4,
+		SpinBit:          typeByte&0x10 != 0,
+		KeyPhase:         int(typeByte&0x20) >> 5,
 		OmitConnectionID: !hasConnID,
 		ConnectionID:     protocol.ConnectionID(connID),
 		PacketNumber:     protocol.PacketNumber(pn),
@@ -103,28 +105,28 @@ func (h *Header) writeHeader(b *bytes.Buffer) error {
 
 // TODO: add support for the key phase
 func (h *Header) writeLongHeader(b *bytes.Buffer) error {
-	b.WriteByte(byte(0x80 ^ h.Type))
+	b.WriteByte(byte(h.Type ^ 0xFF))
 	utils.BigEndian.WriteUint64(b, uint64(h.ConnectionID))
-	utils.BigEndian.WriteUint32(b, uint32(h.PacketNumber))
 	utils.BigEndian.WriteUint32(b, uint32(h.Version))
+	utils.BigEndian.WriteUint32(b, uint32(h.PacketNumber))
 	return nil
 }
 
 func (h *Header) writeShortHeader(b *bytes.Buffer) error {
-	typeByte := byte(h.KeyPhase << 4)
+	typeByte := byte(h.KeyPhase << 5)
 	if h.SpinBit {
-		typeByte ^= 0x40
+		typeByte ^= 0x10
 	}
 	if !h.OmitConnectionID {
-		typeByte ^= 0x20
+		typeByte ^= 0x40
 	}
 	switch h.PacketNumberLen {
 	case protocol.PacketNumberLen1:
-		typeByte ^= 0x1
+		typeByte ^= 0xF
 	case protocol.PacketNumberLen2:
-		typeByte ^= 0x2
+		typeByte ^= 0xE
 	case protocol.PacketNumberLen4:
-		typeByte ^= 0x3
+		typeByte ^= 0xD
 	default:
 		return fmt.Errorf("invalid packet number length: %d", h.PacketNumberLen)
 	}

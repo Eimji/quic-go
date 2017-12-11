@@ -19,17 +19,20 @@ type streamI interface {
 
 	AddStreamFrame(*wire.StreamFrame) error
 	RegisterRemoteError(error, protocol.ByteCount) error
-	LenOfDataForWriting() protocol.ByteCount
-	GetDataForWriting(maxBytes protocol.ByteCount) []byte
+	HasDataForWriting() bool
+	GetDataForWriting(maxBytes protocol.ByteCount) (data []byte, shouldSendFin bool)
 	GetWriteOffset() protocol.ByteCount
 	Finished() bool
 	Cancel(error)
-	ShouldSendFin() bool
-	SentFin()
 	// methods needed for flow control
 	GetWindowUpdate() protocol.ByteCount
 	UpdateSendWindow(protocol.ByteCount)
 	IsFlowControlBlocked() bool
+}
+
+type cryptoStream interface {
+	streamI
+	SetReadOffset(protocol.ByteCount)
 }
 
 // A Stream assembles the data from StreamFrames and provides a super-convenient Read-Interface
@@ -258,22 +261,30 @@ func (s *stream) GetWriteOffset() protocol.ByteCount {
 	return s.writeOffset
 }
 
-func (s *stream) LenOfDataForWriting() protocol.ByteCount {
+// HasDataForWriting says if there's stream available to be dequeued for writing
+func (s *stream) HasDataForWriting() bool {
 	s.mutex.Lock()
-	var l protocol.ByteCount
-	if s.err == nil {
-		l = protocol.ByteCount(len(s.dataForWriting))
-	}
+	hasData := s.err == nil && // nothing should be sent if an error occurred
+		(len(s.dataForWriting) > 0 || // there is data queued for sending
+			s.finishedWriting.Get() && !s.finSent.Get()) // if there is no data, but writing finished and the FIN hasn't been sent yet
 	s.mutex.Unlock()
-	return l
+	return hasData
 }
 
-func (s *stream) GetDataForWriting(maxBytes protocol.ByteCount) []byte {
+func (s *stream) GetDataForWriting(maxBytes protocol.ByteCount) ([]byte, bool /* should send FIN */) {
+	data, shouldSendFin := s.getDataForWritingImpl(maxBytes)
+	if shouldSendFin {
+		s.finSent.Set(true)
+	}
+	return data, shouldSendFin
+}
+
+func (s *stream) getDataForWritingImpl(maxBytes protocol.ByteCount) ([]byte, bool /* should send FIN */) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if s.err != nil || s.dataForWriting == nil {
-		return nil
+		return nil, s.finishedWriting.Get() && !s.finSent.Get()
 	}
 
 	// TODO(#657): Flow control for the crypto stream
@@ -281,7 +292,7 @@ func (s *stream) GetDataForWriting(maxBytes protocol.ByteCount) []byte {
 		maxBytes = utils.MinByteCount(maxBytes, s.flowController.SendWindowSize())
 	}
 	if maxBytes == 0 {
-		return nil
+		return nil, false
 	}
 
 	var ret []byte
@@ -295,7 +306,7 @@ func (s *stream) GetDataForWriting(maxBytes protocol.ByteCount) []byte {
 	}
 	s.writeOffset += protocol.ByteCount(len(ret))
 	s.flowController.AddBytesSent(protocol.ByteCount(len(ret)))
-	return ret
+	return ret, s.finishedWriting.Get() && s.dataForWriting == nil && !s.finSent.Get()
 }
 
 // Close implements io.Closer
@@ -311,17 +322,6 @@ func (s *stream) shouldSendReset() bool {
 		return false
 	}
 	return (s.resetLocally.Get() || s.resetRemotely.Get()) && !s.finishedWriteAndSentFin()
-}
-
-func (s *stream) ShouldSendFin() bool {
-	s.mutex.Lock()
-	res := s.finishedWriting.Get() && !s.finSent.Get() && s.err == nil && s.dataForWriting == nil
-	s.mutex.Unlock()
-	return res
-}
-
-func (s *stream) SentFin() {
-	s.finSent.Set(true)
 }
 
 // AddStreamFrame adds a new stream frame
@@ -480,4 +480,12 @@ func (s *stream) IsFlowControlBlocked() bool {
 
 func (s *stream) GetWindowUpdate() protocol.ByteCount {
 	return s.flowController.GetWindowUpdate()
+}
+
+// SetReadOffset sets the read offset.
+// It is only needed for the crypto stream.
+// It must not be called concurrently with any other stream methods, especially Read and Write.
+func (s *stream) SetReadOffset(offset protocol.ByteCount) {
+	s.readOffset = offset
+	s.frameQueue.readPosition = offset
 }

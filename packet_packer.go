@@ -33,9 +33,11 @@ type packetPacker struct {
 	leastUnacked     protocol.PacketNumber
 	omitConnectionID bool
 	spinBit          bool
+	hasSentPacket    bool // has the packetPacker already sent a packet
 }
 
 func newPacketPacker(connectionID protocol.ConnectionID,
+	initialPacketNumber protocol.PacketNumber,
 	cryptoSetup handshake.CryptoSetup,
 	streamFramer *streamFramer,
 	perspective protocol.Perspective,
@@ -47,7 +49,7 @@ func newPacketPacker(connectionID protocol.ConnectionID,
 		perspective:           perspective,
 		version:               version,
 		streamFramer:          streamFramer,
-		packetNumberGenerator: newPacketNumberGenerator(protocol.SkipPacketAveragePeriodLength),
+		packetNumberGenerator: newPacketNumberGenerator(initialPacketNumber, protocol.SkipPacketAveragePeriodLength),
 	}
 }
 
@@ -117,7 +119,12 @@ func (p *packetPacker) PackHandshakeRetransmission(packet *ackhandler.Packet) (*
 // PackPacket packs a new packet
 // the other controlFrames are sent in the next packet, but might be queued and sent in the next packet if the packet would overflow MaxPacketSize otherwise
 func (p *packetPacker) PackPacket() (*packedPacket, error) {
-	if p.streamFramer.HasCryptoStreamFrame() {
+	hasCryptoStreamFrame := p.streamFramer.HasCryptoStreamFrame()
+	// if this is the first packet to be send, make sure it contains stream data
+	if !p.hasSentPacket && !hasCryptoStreamFrame {
+		return nil, nil
+	}
+	if hasCryptoStreamFrame {
 		return p.packCryptoPacket()
 	}
 
@@ -230,10 +237,16 @@ func (p *packetPacker) composeNextPacket(
 		return payloadFrames, nil
 	}
 
-	// temporarily increase the maxFrameSize by 2 bytes
+	// temporarily increase the maxFrameSize by the (minimum) length of the DataLen field
 	// this leads to a properly sized packet in all cases, since we do all the packet length calculations with StreamFrames that have the DataLen set
-	// however, for the last StreamFrame in the packet, we can omit the DataLen, thus saving 2 bytes and yielding a packet of exactly the correct size
-	maxFrameSize += 2
+	// however, for the last StreamFrame in the packet, we can omit the DataLen, thus yielding a packet of exactly the correct size
+	// for gQUIC STREAM frames, DataLen is always 2 bytes
+	// for IETF draft style STREAM frames, the length is encoded to either 1 or 2 bytes
+	if p.version.UsesIETFFrameFormat() {
+		maxFrameSize++
+	} else {
+		maxFrameSize += 2
+	}
 
 	fs := p.streamFramer.PopStreamFrames(maxFrameSize - payloadLength)
 	if len(fs) != 0 {
@@ -267,19 +280,22 @@ func (p *packetPacker) getHeader(encLevel protocol.EncryptionLevel) *wire.Header
 	pnum := p.packetNumberGenerator.Peek()
 	packetNumberLen := protocol.GetPacketNumberLengthForHeader(pnum, p.leastUnacked)
 
-	var isLongHeader bool
-	if p.version.UsesTLS() && encLevel != protocol.EncryptionForwardSecure {
-		// TODO: set the Long Header type
-		packetNumberLen = protocol.PacketNumberLen4
-		isLongHeader = true
-	}
-
 	header := &wire.Header{
 		SpinBit:         p.spinBit,
 		ConnectionID:    p.connectionID,
 		PacketNumber:    pnum,
 		PacketNumberLen: packetNumberLen,
-		IsLongHeader:    isLongHeader,
+	}
+
+	if p.version.UsesTLS() && encLevel != protocol.EncryptionForwardSecure {
+		header.PacketNumberLen = protocol.PacketNumberLen4
+		header.IsLongHeader = true
+		if !p.hasSentPacket && p.perspective == protocol.PerspectiveClient {
+			header.Type = protocol.PacketTypeInitial
+			// TODO(#886): add padding
+		} else {
+			header.Type = protocol.PacketTypeHandshake
+		}
 	}
 
 	if p.omitConnectionID && encLevel == protocol.EncryptionForwardSecure {
@@ -294,7 +310,6 @@ func (p *packetPacker) getHeader(encLevel protocol.EncryptionLevel) *wire.Header
 			header.Version = p.version
 		}
 	} else {
-		header.Type = p.cryptoSetup.GetNextPacketType()
 		if encLevel != protocol.EncryptionForwardSecure {
 			header.Version = p.version
 		}
@@ -332,7 +347,7 @@ func (p *packetPacker) writeAndSealPacket(
 	if num != header.PacketNumber {
 		return nil, errors.New("packetPacker BUG: Peeked and Popped packet numbers do not match")
 	}
-
+	p.hasSentPacket = true
 	return raw, nil
 }
 

@@ -126,21 +126,19 @@ func (s *Server) handleHeaderStream(session streamCreator) {
 	hpackDecoder := hpack.NewDecoder(4096, nil)
 	h2framer := http2.NewFramer(nil, stream)
 
-	go func() {
-		var headerStreamMutex sync.Mutex // Protects concurrent calls to Write()
-		for {
-			if err := s.handleRequest(session, stream, &headerStreamMutex, hpackDecoder, h2framer); err != nil {
-				// QuicErrors must originate from stream.Read() returning an error.
-				// In this case, the session has already logged the error, so we don't
-				// need to log it again.
-				if _, ok := err.(*qerr.QuicError); !ok {
-					utils.Errorf("error handling h2 request: %s", err.Error())
-				}
-				session.Close(err)
-				return
+	var headerStreamMutex sync.Mutex // Protects concurrent calls to Write()
+	for {
+		if err := s.handleRequest(session, stream, &headerStreamMutex, hpackDecoder, h2framer); err != nil {
+			// QuicErrors must originate from stream.Read() returning an error.
+			// In this case, the session has already logged the error, so we don't
+			// need to log it again.
+			if _, ok := err.(*qerr.QuicError); !ok {
+				utils.Errorf("error handling h2 request: %s", err.Error())
 			}
+			session.Close(err)
+			return
 		}
-	}()
+	}
 }
 
 func (s *Server) handleRequest(session streamCreator, headerStream quic.Stream, headerStreamMutex *sync.Mutex, hpackDecoder *hpack.Decoder, h2framer *http2.Framer) error {
@@ -166,8 +164,6 @@ func (s *Server) handleRequest(session streamCreator, headerStream quic.Stream, 
 		return err
 	}
 
-	req.RemoteAddr = session.RemoteAddr().String()
-
 	if utils.Debug() {
 		utils.Infof("%s %s%s, on data stream %d", req.Method, req.Host, req.RequestURI, h2headersFrame.StreamID)
 	} else {
@@ -183,20 +179,25 @@ func (s *Server) handleRequest(session streamCreator, headerStream quic.Stream, 
 		return nil
 	}
 
-	var streamEnded bool
-	if h2headersFrame.StreamEnded() {
-		dataStream.(remoteCloser).CloseRemote(0)
-		streamEnded = true
-		_, _ = dataStream.Read([]byte{0}) // read the eof
-	}
-
-	req = req.WithContext(dataStream.Context())
-	reqBody := newRequestBody(dataStream)
-	req.Body = reqBody
-
-	responseWriter := newResponseWriter(headerStream, headerStreamMutex, dataStream, protocol.StreamID(h2headersFrame.StreamID))
-
+	// handleRequest should be as non-blocking as possible to minimize
+	// head-of-line blocking. Potentially blocking code is run in a separate
+	// goroutine, enabling handleRequest to return before the code is executed.
 	go func() {
+		streamEnded := h2headersFrame.StreamEnded()
+		if streamEnded {
+			dataStream.(remoteCloser).CloseRemote(0)
+			streamEnded = true
+			_, _ = dataStream.Read([]byte{0}) // read the eof
+		}
+
+		req = req.WithContext(dataStream.Context())
+		reqBody := newRequestBody(dataStream)
+		req.Body = reqBody
+
+		req.RemoteAddr = session.RemoteAddr().String()
+
+		responseWriter := newResponseWriter(headerStream, headerStreamMutex, dataStream, protocol.StreamID(h2headersFrame.StreamID))
+
 		handler := s.Handler
 		if handler == nil {
 			handler = http.DefaultServeMux

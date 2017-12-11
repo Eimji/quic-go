@@ -23,6 +23,7 @@ var _ = Describe("Public Header", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(hdr.SpinBit).To(BeFalse())
 			Expect(hdr.VersionFlag).To(BeTrue())
+			Expect(hdr.IsVersionNegotiation).To(BeFalse())
 			Expect(hdr.ResetFlag).To(BeFalse())
 			Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x4cfa9f9b668619f6)))
 			Expect(hdr.Version).To(Equal(protocol.SupportedVersions[0]))
@@ -66,6 +67,7 @@ var _ = Describe("Public Header", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(hdr.ResetFlag).To(BeTrue())
 			Expect(hdr.VersionFlag).To(BeFalse())
+			Expect(hdr.IsVersionNegotiation).To(BeFalse())
 			Expect(hdr.ConnectionID).To(Equal(protocol.ConnectionID(0x0102030405060708)))
 		})
 
@@ -96,13 +98,18 @@ var _ = Describe("Public Header", func() {
 				return data
 			}
 
-			It("parses version negotiation packets sent by the server", func() {
-				b := bytes.NewReader(ComposeGQUICVersionNegotiation(0x1337, protocol.SupportedVersions))
+			It("parses", func() {
+				versions := []protocol.VersionNumber{0x13, 0x37}
+				b := bytes.NewReader(ComposeGQUICVersionNegotiation(0x1337, versions))
 				hdr, err := parsePublicHeader(b, protocol.PerspectiveServer)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(hdr.VersionFlag).To(BeTrue())
 				Expect(hdr.Version).To(BeZero()) // unitialized
-				Expect(hdr.SupportedVersions).To(Equal(protocol.SupportedVersions))
+				Expect(hdr.IsVersionNegotiation).To(BeTrue())
+				// in addition to the versions, the supported versions might contain a reserved version number
+				for _, version := range versions {
+					Expect(hdr.SupportedVersions).To(ContainElement(version))
+				}
 				Expect(b.Len()).To(BeZero())
 			})
 
@@ -121,6 +128,7 @@ var _ = Describe("Public Header", func() {
 				hdr, err := parsePublicHeader(b, protocol.PerspectiveServer)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(hdr.VersionFlag).To(BeTrue())
+				Expect(hdr.IsVersionNegotiation).To(BeTrue())
 				Expect(hdr.SupportedVersions).To(Equal([]protocol.VersionNumber{1, protocol.SupportedVersions[0], 99}))
 				Expect(b.Len()).To(BeZero())
 			})
@@ -423,11 +431,7 @@ var _ = Describe("Public Header", func() {
 			})
 
 			Context("in big endian", func() {
-				version := protocol.Version39
-
-				BeforeEach(func() {
-					Expect(utils.GetByteOrder(version)).To(Equal(utils.BigEndian))
-				})
+				version := versionBigEndian
 
 				It("writes a header with a 1-byte packet number", func() {
 					b := &bytes.Buffer{}

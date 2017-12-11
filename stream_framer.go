@@ -9,6 +9,7 @@ import (
 type streamFramer struct {
 	streamsMap   *streamsMap
 	cryptoStream streamI
+	version      protocol.VersionNumber
 
 	connFlowController flowcontrol.ConnectionFlowController
 
@@ -20,11 +21,13 @@ func newStreamFramer(
 	cryptoStream streamI,
 	streamsMap *streamsMap,
 	cfc flowcontrol.ConnectionFlowController,
+	v protocol.VersionNumber,
 ) *streamFramer {
 	return &streamFramer{
 		streamsMap:         streamsMap,
 		cryptoStream:       cryptoStream,
 		connFlowController: cfc,
+		version:            v,
 	}
 }
 
@@ -51,7 +54,7 @@ func (f *streamFramer) HasFramesForRetransmission() bool {
 }
 
 func (f *streamFramer) HasCryptoStreamFrame() bool {
-	return f.cryptoStream.LenOfDataForWriting() > 0
+	return f.cryptoStream.HasDataForWriting()
 }
 
 // TODO(lclemente): This is somewhat duplicate with the normal path for generating frames.
@@ -63,8 +66,8 @@ func (f *streamFramer) PopCryptoStreamFrame(maxLen protocol.ByteCount) *wire.Str
 		StreamID: f.cryptoStream.StreamID(),
 		Offset:   f.cryptoStream.GetWriteOffset(),
 	}
-	frameHeaderBytes, _ := frame.MinLength(protocol.VersionWhatever) // can never error
-	frame.Data = f.cryptoStream.GetDataForWriting(maxLen - frameHeaderBytes)
+	frameHeaderBytes, _ := frame.MinLength(f.version) // can never error
+	frame.Data, frame.FinBit = f.cryptoStream.GetDataForWriting(maxLen - frameHeaderBytes)
 	return frame
 }
 
@@ -73,7 +76,7 @@ func (f *streamFramer) maybePopFramesForRetransmission(maxLen protocol.ByteCount
 		frame := f.retransmissionQueue[0]
 		frame.DataLenPresent = true
 
-		frameHeaderLen, _ := frame.MinLength(protocol.VersionWhatever) // can never error
+		frameHeaderLen, _ := frame.MinLength(f.version) // can never error
 		if currentLen+frameHeaderLen >= maxLen {
 			break
 		}
@@ -106,29 +109,18 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount) (res []
 		frame.StreamID = s.StreamID()
 		frame.Offset = s.GetWriteOffset()
 		// not perfect, but thread-safe since writeOffset is only written when getting data
-		frameHeaderBytes, _ := frame.MinLength(protocol.VersionWhatever) // can never error
+		frameHeaderBytes, _ := frame.MinLength(f.version) // can never error
 		if currentLen+frameHeaderBytes > maxBytes {
 			return false, nil // theoretically, we could find another stream that fits, but this is quite unlikely, so we stop here
 		}
 		maxLen := maxBytes - currentLen - frameHeaderBytes
 
-		var data []byte
-		if s.LenOfDataForWriting() > 0 {
-			data = s.GetDataForWriting(maxLen)
+		if s.HasDataForWriting() {
+			frame.Data, frame.FinBit = s.GetDataForWriting(maxLen)
 		}
-
-		// This is unlikely, but check it nonetheless, the scheduler might have jumped in. Seems to happen in ~20% of cases in the tests.
-		shouldSendFin := s.ShouldSendFin()
-		if data == nil && !shouldSendFin {
+		if len(frame.Data) == 0 && !frame.FinBit {
 			return true, nil
 		}
-
-		if shouldSendFin {
-			frame.FinBit = true
-			s.SentFin()
-		}
-
-		frame.Data = data
 
 		// Finally, check if we are now FC blocked and should queue a BLOCKED frame
 		if !frame.FinBit && s.IsFlowControlBlocked() {
