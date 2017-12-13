@@ -8,7 +8,7 @@ import (
 
 type streamFramer struct {
 	streamsMap   *streamsMap
-	cryptoStream streamI
+	cryptoStream cryptoStreamI
 	version      protocol.VersionNumber
 
 	connFlowController flowcontrol.ConnectionFlowController
@@ -18,7 +18,7 @@ type streamFramer struct {
 }
 
 func newStreamFramer(
-	cryptoStream streamI,
+	cryptoStream cryptoStreamI,
 	streamsMap *streamsMap,
 	cfc flowcontrol.ConnectionFlowController,
 	v protocol.VersionNumber,
@@ -59,46 +59,35 @@ func (f *streamFramer) HasCryptoStreamFrame() bool {
 
 // TODO(lclemente): This is somewhat duplicate with the normal path for generating frames.
 func (f *streamFramer) PopCryptoStreamFrame(maxLen protocol.ByteCount) *wire.StreamFrame {
-	if !f.HasCryptoStreamFrame() {
-		return nil
-	}
-	frame := &wire.StreamFrame{
-		StreamID: f.cryptoStream.StreamID(),
-		Offset:   f.cryptoStream.GetWriteOffset(),
-	}
-	frameHeaderBytes, _ := frame.MinLength(f.version) // can never error
-	frame.Data, frame.FinBit = f.cryptoStream.GetDataForWriting(maxLen - frameHeaderBytes)
-	return frame
+	return f.cryptoStream.PopStreamFrame(maxLen)
 }
 
-func (f *streamFramer) maybePopFramesForRetransmission(maxLen protocol.ByteCount) (res []*wire.StreamFrame, currentLen protocol.ByteCount) {
+func (f *streamFramer) maybePopFramesForRetransmission(maxTotalLen protocol.ByteCount) (res []*wire.StreamFrame, currentLen protocol.ByteCount) {
 	for len(f.retransmissionQueue) > 0 {
 		frame := f.retransmissionQueue[0]
 		frame.DataLenPresent = true
 
-		frameHeaderLen, _ := frame.MinLength(f.version) // can never error
-		if currentLen+frameHeaderLen >= maxLen {
+		frameHeaderLen := frame.MinLength(f.version) // can never error
+		maxLen := maxTotalLen - currentLen
+		if frameHeaderLen+frame.DataLen() > maxLen && maxLen < protocol.MinStreamFrameSize {
 			break
 		}
 
-		currentLen += frameHeaderLen
-
-		splitFrame := maybeSplitOffFrame(frame, maxLen-currentLen)
+		splitFrame := maybeSplitOffFrame(frame, maxLen-frameHeaderLen)
 		if splitFrame != nil { // StreamFrame was split
 			res = append(res, splitFrame)
-			currentLen += splitFrame.DataLen()
+			currentLen += frameHeaderLen + splitFrame.DataLen()
 			break
 		}
 
 		f.retransmissionQueue = f.retransmissionQueue[1:]
 		res = append(res, frame)
-		currentLen += frame.DataLen()
+		currentLen += frameHeaderLen + frame.DataLen()
 	}
 	return
 }
 
-func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount) (res []*wire.StreamFrame) {
-	frame := &wire.StreamFrame{DataLenPresent: true}
+func (f *streamFramer) maybePopNormalFrames(maxTotalLen protocol.ByteCount) (res []*wire.StreamFrame) {
 	var currentLen protocol.ByteCount
 
 	fn := func(s streamI) (bool, error) {
@@ -106,19 +95,12 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount) (res []
 			return true, nil
 		}
 
-		frame.StreamID = s.StreamID()
-		frame.Offset = s.GetWriteOffset()
-		// not perfect, but thread-safe since writeOffset is only written when getting data
-		frameHeaderBytes, _ := frame.MinLength(f.version) // can never error
-		if currentLen+frameHeaderBytes > maxBytes {
-			return false, nil // theoretically, we could find another stream that fits, but this is quite unlikely, so we stop here
+		maxLen := maxTotalLen - currentLen
+		if maxLen < protocol.MinStreamFrameSize { // don't try to add new STREAM frames, if only little space is left in the packet
+			return false, nil
 		}
-		maxLen := maxBytes - currentLen - frameHeaderBytes
-
-		if s.HasDataForWriting() {
-			frame.Data, frame.FinBit = s.GetDataForWriting(maxLen)
-		}
-		if len(frame.Data) == 0 && !frame.FinBit {
+		frame := s.PopStreamFrame(maxLen)
+		if frame == nil {
 			return true, nil
 		}
 
@@ -131,9 +113,9 @@ func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount) (res []
 		}
 
 		res = append(res, frame)
-		currentLen += frameHeaderBytes + frame.DataLen()
+		currentLen += frame.MinLength(f.version) + frame.DataLen()
 
-		if currentLen == maxBytes {
+		if currentLen == maxTotalLen {
 			return false, nil
 		}
 

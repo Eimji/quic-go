@@ -56,12 +56,12 @@ var _ = Describe("Packet packer", func() {
 		publicHeaderLen protocol.ByteCount
 		maxFrameSize    protocol.ByteCount
 		streamFramer    *streamFramer
-		cryptoStream    *stream
+		cryptoStream    cryptoStreamI
 	)
 
 	BeforeEach(func() {
 		version := versionGQUICFrames
-		cryptoStream = &stream{streamID: version.CryptoStreamID(), flowController: flowcontrol.NewStreamFlowController(version.CryptoStreamID(), false, flowcontrol.NewConnectionFlowController(1000, 1000, nil), 1000, 1000, 1000, nil)}
+		cryptoStream = newCryptoStream(func() {}, flowcontrol.NewStreamFlowController(version.CryptoStreamID(), false, flowcontrol.NewConnectionFlowController(1000, 1000, nil), 1000, 1000, 1000, nil), version)
 		streamsMap := newStreamsMap(nil, protocol.PerspectiveServer, versionGQUICFrames)
 		streamFramer = newStreamFramer(cryptoStream, streamsMap, nil, versionGQUICFrames)
 
@@ -329,8 +329,7 @@ var _ = Describe("Packet packer", func() {
 
 	It("packs a lot of control frames into 2 packets if they don't fit into one", func() {
 		blockedFrame := &wire.BlockedFrame{}
-		minLength, _ := blockedFrame.MinLength(packer.version)
-		maxFramesPerPacket := int(maxFrameSize) / int(minLength)
+		maxFramesPerPacket := int(maxFrameSize) / int(blockedFrame.MinLength(packer.version))
 		var controlFrames []wire.Frame
 		for i := 0; i < maxFramesPerPacket+10; i++ {
 			controlFrames = append(controlFrames, blockedFrame)
@@ -362,6 +361,49 @@ var _ = Describe("Packet packer", func() {
 		Expect(packer.packetNumberGenerator.Peek()).To(Equal(protocol.PacketNumber(2)))
 	})
 
+	It("adds a PING frame when it's supposed to send a retransmittable packet", func() {
+		packer.QueueControlFrame(&wire.AckFrame{})
+		packer.QueueControlFrame(&wire.StopWaitingFrame{})
+		packer.MakeNextPacketRetransmittable()
+		p, err := packer.PackPacket()
+		Expect(p).ToNot(BeNil())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p.frames).To(HaveLen(3))
+		Expect(p.frames).To(ContainElement(&wire.PingFrame{}))
+		// make sure the next packet doesn't contain another PING
+		packer.QueueControlFrame(&wire.AckFrame{})
+		p, err = packer.PackPacket()
+		Expect(p).ToNot(BeNil())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p.frames).To(HaveLen(1))
+	})
+
+	It("waits until there's something to send before adding a PING frame", func() {
+		packer.MakeNextPacketRetransmittable()
+		p, err := packer.PackPacket()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p).To(BeNil())
+		packer.QueueControlFrame(&wire.AckFrame{})
+		p, err = packer.PackPacket()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p.frames).To(HaveLen(2))
+		Expect(p.frames).To(ContainElement(&wire.PingFrame{}))
+	})
+
+	It("doesn't send a PING if it already sent another retransmittable frame", func() {
+		packer.MakeNextPacketRetransmittable()
+		packer.QueueControlFrame(&wire.MaxDataFrame{})
+		p, err := packer.PackPacket()
+		Expect(p).ToNot(BeNil())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p.frames).To(HaveLen(1))
+		packer.QueueControlFrame(&wire.AckFrame{})
+		p, err = packer.PackPacket()
+		Expect(p).ToNot(BeNil())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(p.frames).To(HaveLen(1))
+	})
+
 	Context("STREAM Frame handling", func() {
 		It("does not splits a STREAM frame with maximum size, for gQUIC frames", func() {
 			f := &wire.StreamFrame{
@@ -369,8 +411,7 @@ var _ = Describe("Packet packer", func() {
 				StreamID:       5,
 				DataLenPresent: false,
 			}
-			minLength, _ := f.MinLength(packer.version)
-			maxStreamFrameDataLen := maxFrameSize - minLength
+			maxStreamFrameDataLen := maxFrameSize - f.MinLength(packer.version)
 			f.Data = bytes.Repeat([]byte{'f'}, int(maxStreamFrameDataLen))
 			streamFramer.AddFrameForRetransmission(f)
 			payloadFrames, err := packer.composeNextPacket(maxFrameSize, true)
@@ -390,10 +431,9 @@ var _ = Describe("Packet packer", func() {
 				StreamID:       5,
 				DataLenPresent: true,
 			}
-			minLength, _ := f.MinLength(packer.version)
 			// for IETF draft style STREAM frames, we don't know the size of the DataLen, because it is a variable length integer
 			// in the general case, we therefore use a STREAM frame that is 1 byte smaller than the maximum size
-			maxStreamFrameDataLen := maxFrameSize - minLength - 1
+			maxStreamFrameDataLen := maxFrameSize - f.MinLength(packer.version) - 1
 			f.Data = bytes.Repeat([]byte{'f'}, int(maxStreamFrameDataLen))
 			streamFramer.AddFrameForRetransmission(f)
 			payloadFrames, err := packer.composeNextPacket(maxFrameSize, true)
@@ -467,8 +507,7 @@ var _ = Describe("Packet packer", func() {
 				StreamID: 7,
 				Offset:   1,
 			}
-			minLength, _ := f.MinLength(packer.version)
-			maxStreamFrameDataLen := maxFrameSize - minLength
+			maxStreamFrameDataLen := maxFrameSize - f.MinLength(packer.version)
 			f.Data = bytes.Repeat([]byte{'f'}, int(maxStreamFrameDataLen)+200)
 			streamFramer.AddFrameForRetransmission(f)
 			payloadFrames, err := packer.composeNextPacket(maxFrameSize, true)
@@ -526,8 +565,7 @@ var _ = Describe("Packet packer", func() {
 				StreamID: 5,
 				Offset:   1,
 			}
-			minLength, _ := f.MinLength(packer.version)
-			f.Data = bytes.Repeat([]byte{'f'}, int(maxFrameSize-minLength+1)) // + 1 since MinceLength is 1 bigger than the actual StreamFrame header
+			f.Data = bytes.Repeat([]byte{'f'}, int(maxFrameSize-f.MinLength(packer.version)+1)) // + 1 since MinceLength is 1 bigger than the actual StreamFrame header
 			streamFramer.AddFrameForRetransmission(f)
 			p, err := packer.PackPacket()
 			Expect(err).ToNot(HaveOccurred())
@@ -540,8 +578,7 @@ var _ = Describe("Packet packer", func() {
 				StreamID: 5,
 				Offset:   1,
 			}
-			minLength, _ := f.MinLength(packer.version)
-			f.Data = bytes.Repeat([]byte{'f'}, int(maxFrameSize-minLength+2)) // + 2 since MinceLength is 1 bigger than the actual StreamFrame header
+			f.Data = bytes.Repeat([]byte{'f'}, int(maxFrameSize-f.MinLength(packer.version)+2)) // + 2 since MinceLength is 1 bigger than the actual StreamFrame header
 
 			streamFramer.AddFrameForRetransmission(f)
 			payloadFrames, err := packer.composeNextPacket(maxFrameSize, true)
@@ -591,29 +628,55 @@ var _ = Describe("Packet packer", func() {
 		})
 
 		It("sends unencrypted stream data on the crypto stream", func() {
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				_, err := cryptoStream.Write([]byte("foobar"))
+				Expect(err).ToNot(HaveOccurred())
+				close(done)
+			}()
 			packer.cryptoSetup.(*mockCryptoSetup).encLevelSealCrypto = protocol.EncryptionUnencrypted
-			cryptoStream.dataForWriting = []byte("foobar")
-			p, err := packer.PackPacket()
-			Expect(err).ToNot(HaveOccurred())
+			var p *packedPacket
+			Eventually(func() *packedPacket {
+				defer GinkgoRecover()
+				var err error
+				p, err = packer.PackPacket()
+				Expect(err).ToNot(HaveOccurred())
+				return p
+			}).ShouldNot(BeNil())
 			Expect(p.encryptionLevel).To(Equal(protocol.EncryptionUnencrypted))
 			Expect(p.frames).To(HaveLen(1))
 			Expect(p.frames[0]).To(Equal(&wire.StreamFrame{
 				StreamID: packer.version.CryptoStreamID(),
 				Data:     []byte("foobar"),
 			}))
+			Eventually(done).Should(BeClosed())
 		})
 
 		It("sends encrypted stream data on the crypto stream", func() {
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				_, err := cryptoStream.Write([]byte("foobar"))
+				Expect(err).ToNot(HaveOccurred())
+				close(done)
+			}()
 			packer.cryptoSetup.(*mockCryptoSetup).encLevelSealCrypto = protocol.EncryptionSecure
-			cryptoStream.dataForWriting = []byte("foobar")
-			p, err := packer.PackPacket()
-			Expect(err).ToNot(HaveOccurred())
+			var p *packedPacket
+			Eventually(func() *packedPacket {
+				defer GinkgoRecover()
+				var err error
+				p, err = packer.PackPacket()
+				Expect(err).ToNot(HaveOccurred())
+				return p
+			}).ShouldNot(BeNil())
 			Expect(p.encryptionLevel).To(Equal(protocol.EncryptionSecure))
 			Expect(p.frames).To(HaveLen(1))
 			Expect(p.frames[0]).To(Equal(&wire.StreamFrame{
 				StreamID: packer.version.CryptoStreamID(),
 				Data:     []byte("foobar"),
 			}))
+			Eventually(done).Should(BeClosed())
 		})
 
 		It("does not pack stream frames if not allowed", func() {
@@ -765,6 +828,34 @@ var _ = Describe("Packet packer", func() {
 			}
 			_, err := packer.PackHandshakeRetransmission(packet)
 			Expect(err).To(MatchError("PacketPacker BUG: packet too large"))
+		})
+
+		It("pads Initial packets to the required minimum packet size", func() {
+			packer.version = protocol.VersionTLS
+			packer.hasSentPacket = false
+			packer.perspective = protocol.PerspectiveClient
+			packer.cryptoSetup.(*mockCryptoSetup).encLevelSealCrypto = protocol.EncryptionUnencrypted
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				_, err := cryptoStream.Write([]byte("foobar"))
+				Expect(err).ToNot(HaveOccurred())
+				close(done)
+			}()
+			var packet *packedPacket
+			Eventually(func() *packedPacket {
+				defer GinkgoRecover()
+				var err error
+				packet, err = packer.PackPacket()
+				Expect(err).ToNot(HaveOccurred())
+				return packet
+			}).ShouldNot(BeNil())
+			Expect(packet.raw).To(HaveLen(protocol.MinInitialPacketSize))
+			Expect(packet.frames).To(HaveLen(1))
+			sf := packet.frames[0].(*wire.StreamFrame)
+			Expect(sf.Data).To(Equal([]byte("foobar")))
+			Expect(sf.DataLenPresent).To(BeTrue())
+			Eventually(done).Should(BeClosed())
 		})
 
 		It("refuses to retransmit packets that were sent with forward-secure encryption", func() {

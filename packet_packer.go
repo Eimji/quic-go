@@ -27,13 +27,14 @@ type packetPacker struct {
 	packetNumberGenerator *packetNumberGenerator
 	streamFramer          *streamFramer
 
-	controlFrames    []wire.Frame
-	stopWaiting      *wire.StopWaitingFrame
-	ackFrame         *wire.AckFrame
-	leastUnacked     protocol.PacketNumber
-	omitConnectionID bool
-	spinBit          bool
-	hasSentPacket    bool // has the packetPacker already sent a packet
+	controlFrames                 []wire.Frame
+	stopWaiting                   *wire.StopWaitingFrame
+	ackFrame                      *wire.AckFrame
+	leastUnacked                  protocol.PacketNumber
+	omitConnectionID              bool
+	spinBit                       bool
+	hasSentPacket                 bool // has the packetPacker already sent a packet
+	makeNextPacketRetransmittable bool
 }
 
 func newPacketPacker(connectionID protocol.ConnectionID,
@@ -154,6 +155,15 @@ func (p *packetPacker) PackPacket() (*packedPacket, error) {
 	if len(payloadFrames) == 1 && p.stopWaiting != nil {
 		return nil, nil
 	}
+	// check if this packet only contains an ACK and / or STOP_WAITING
+	if !ackhandler.HasRetransmittableFrames(payloadFrames) {
+		if p.makeNextPacketRetransmittable {
+			payloadFrames = append(payloadFrames, &wire.PingFrame{})
+			p.makeNextPacketRetransmittable = false
+		}
+	} else { // this packet already contains a retransmittable frame. No need to send a PING
+		p.makeNextPacketRetransmittable = false
+	}
 	p.stopWaiting = nil
 	p.ackFrame = nil
 
@@ -177,7 +187,9 @@ func (p *packetPacker) packCryptoPacket() (*packedPacket, error) {
 		return nil, err
 	}
 	maxLen := protocol.MaxPacketSize - protocol.ByteCount(sealer.Overhead()) - protocol.NonForwardSecurePacketSizeReduction - headerLength
-	frames := []wire.Frame{p.streamFramer.PopCryptoStreamFrame(maxLen)}
+	sf := p.streamFramer.PopCryptoStreamFrame(maxLen)
+	sf.DataLenPresent = false
+	frames := []wire.Frame{sf}
 	raw, err := p.writeAndSealPacket(header, frames, sealer)
 	if err != nil {
 		return nil, err
@@ -200,27 +212,17 @@ func (p *packetPacker) composeNextPacket(
 	// STOP_WAITING and ACK will always fit
 	if p.stopWaiting != nil {
 		payloadFrames = append(payloadFrames, p.stopWaiting)
-		l, err := p.stopWaiting.MinLength(p.version)
-		if err != nil {
-			return nil, err
-		}
-		payloadLength += l
+		payloadLength += p.stopWaiting.MinLength(p.version)
 	}
 	if p.ackFrame != nil {
 		payloadFrames = append(payloadFrames, p.ackFrame)
-		l, err := p.ackFrame.MinLength(p.version)
-		if err != nil {
-			return nil, err
-		}
+		l := p.ackFrame.MinLength(p.version)
 		payloadLength += l
 	}
 
 	for len(p.controlFrames) > 0 {
 		frame := p.controlFrames[len(p.controlFrames)-1]
-		minLength, err := frame.MinLength(p.version)
-		if err != nil {
-			return nil, err
-		}
+		minLength := frame.MinLength(p.version)
 		if payloadLength+minLength > maxFrameSize {
 			break
 		}
@@ -292,7 +294,6 @@ func (p *packetPacker) getHeader(encLevel protocol.EncryptionLevel) *wire.Header
 		header.IsLongHeader = true
 		if !p.hasSentPacket && p.perspective == protocol.PerspectiveClient {
 			header.Type = protocol.PacketTypeInitial
-			// TODO(#886): add padding
 		} else {
 			header.Type = protocol.PacketTypeHandshake
 		}
@@ -329,10 +330,25 @@ func (p *packetPacker) writeAndSealPacket(
 		return nil, err
 	}
 	payloadStartIndex := buffer.Len()
+
+	// the Initial packet needs to be padded, so the last STREAM frame must have the data length present
+	if header.Type == protocol.PacketTypeInitial {
+		lastFrame := payloadFrames[len(payloadFrames)-1]
+		if sf, ok := lastFrame.(*wire.StreamFrame); ok {
+			sf.DataLenPresent = true
+		}
+	}
 	for _, frame := range payloadFrames {
-		err := frame.Write(buffer, p.version)
-		if err != nil {
+		if err := frame.Write(buffer, p.version); err != nil {
 			return nil, err
+		}
+	}
+	// if this is an IETF QUIC Initial packet, we need to pad it to fulfill the minimum size requirement
+	// in gQUIC, padding is handled in the CHLO
+	if header.Type == protocol.PacketTypeInitial {
+		paddingLen := protocol.MinInitialPacketSize - sealer.Overhead() - buffer.Len()
+		if paddingLen > 0 {
+			buffer.Write(bytes.Repeat([]byte{0}, paddingLen))
 		}
 	}
 	if protocol.ByteCount(buffer.Len()+sealer.Overhead()) > protocol.MaxPacketSize {
@@ -368,4 +384,8 @@ func (p *packetPacker) SetOmitConnectionID() {
 
 func (p *packetPacker) SetSpinBit(value bool) {
 	p.spinBit = value
+}
+
+func (p *packetPacker) MakeNextPacketRetransmittable() {
+	p.makeNextPacketRetransmittable = true
 }

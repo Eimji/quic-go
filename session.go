@@ -32,11 +32,6 @@ type receivedPacket struct {
 }
 
 var (
-	errRstStreamOnInvalidStream   = errors.New("RST_STREAM received for unknown stream")
-	errWindowUpdateOnClosedStream = errors.New("WINDOW_UPDATE received for an already closed stream")
-)
-
-var (
 	newCryptoSetup       = handshake.NewCryptoSetup
 	newCryptoSetupClient = handshake.NewCryptoSetupClient
 )
@@ -61,7 +56,7 @@ type session struct {
 	conn connection
 
 	streamsMap   *streamsMap
-	cryptoStream cryptoStream
+	cryptoStream cryptoStreamI
 
 	rttStats *congestion.RTTStats
 
@@ -299,7 +294,7 @@ func (s *session) preSetup() {
 		protocol.ByteCount(s.config.MaxReceiveConnectionFlowControlWindow),
 		s.rttStats,
 	)
-	s.cryptoStream = s.newStream(s.version.CryptoStreamID()).(cryptoStream)
+	s.cryptoStream = s.newCryptoStream()
 }
 
 func (s *session) postSetup(initialPacketNumber protocol.PacketNumber) error {
@@ -556,11 +551,6 @@ func (s *session) handleFrames(fs []wire.Frame, encLevel protocol.EncryptionLeve
 			switch err {
 			case ackhandler.ErrDuplicateOrOutOfOrderAck:
 				// Can happen e.g. when packets thought missing arrive late
-			case errRstStreamOnInvalidStream:
-				// Can happen when RST_STREAMs arrive early or late (?)
-				utils.Errorf("Ignoring error in session: %s", err.Error())
-			case errWindowUpdateOnClosedStream:
-				// Can happen when we already sent the last StreamFrame with the FinBit, but the client already sent a WindowUpdate for this Stream
 			default:
 				return err
 			}
@@ -581,6 +571,9 @@ func (s *session) handlePacket(p *receivedPacket) {
 
 func (s *session) handleStreamFrame(frame *wire.StreamFrame) error {
 	if frame.StreamID == s.version.CryptoStreamID() {
+		if frame.FinBit {
+			return errors.New("Received STREAM frame with FIN bit for the crypto stream")
+		}
 		return s.cryptoStream.AddStreamFrame(frame)
 	}
 	str, err := s.streamsMap.GetOrOpenStream(frame.StreamID)
@@ -600,24 +593,33 @@ func (s *session) handleMaxDataFrame(frame *wire.MaxDataFrame) {
 }
 
 func (s *session) handleMaxStreamDataFrame(frame *wire.MaxStreamDataFrame) error {
+	if frame.StreamID == s.version.CryptoStreamID() {
+		s.cryptoStream.UpdateSendWindow(frame.ByteOffset)
+		return nil
+	}
 	str, err := s.streamsMap.GetOrOpenStream(frame.StreamID)
 	if err != nil {
 		return err
 	}
 	if str == nil {
-		return errWindowUpdateOnClosedStream
+		// stream is closed and already garbage collected
+		return nil
 	}
 	str.UpdateSendWindow(frame.ByteOffset)
 	return nil
 }
 
 func (s *session) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
+	if frame.StreamID == s.version.CryptoStreamID() {
+		return errors.New("Received RST_STREAM frame for the crypto stream")
+	}
 	str, err := s.streamsMap.GetOrOpenStream(frame.StreamID)
 	if err != nil {
 		return err
 	}
 	if str == nil {
-		return errRstStreamOnInvalidStream
+		// stream is closed and already garbage collected
+		return nil
 	}
 	return str.RegisterRemoteError(fmt.Errorf("RST_STREAM received with code %d", frame.ErrorCode), frame.ByteOffset)
 }
@@ -700,8 +702,7 @@ func (s *session) sendPacket() error {
 
 	// Get MAX_DATA and MAX_STREAM_DATA frames
 	// this call triggers the flow controller to increase the flow control windows, if necessary
-	windowUpdates := s.getWindowUpdates()
-	for _, f := range windowUpdates {
+	for _, f := range s.getWindowUpdates() {
 		s.packer.QueueControlFrame(f)
 	}
 
@@ -773,7 +774,7 @@ func (s *session) sendPacket() error {
 		}
 		// add a retransmittable frame
 		if s.sentPacketHandler.ShouldSendRetransmittablePacket() {
-			s.packer.QueueControlFrame(&wire.PingFrame{})
+			s.packer.MakeNextPacketRetransmittable()
 		}
 		packet, err := s.packer.PackPacket()
 		if err != nil || packet == nil {
@@ -783,11 +784,6 @@ func (s *session) sendPacket() error {
 			return err
 		}
 
-		// send every window update twice
-		for _, f := range windowUpdates {
-			s.packer.QueueControlFrame(f)
-		}
-		windowUpdates = nil
 		ack = nil
 	}
 }
@@ -886,6 +882,20 @@ func (s *session) newStream(id protocol.StreamID) streamI {
 	return newStream(id, s.scheduleSending, s.queueResetStreamFrame, flowController, s.version)
 }
 
+func (s *session) newCryptoStream() cryptoStreamI {
+	id := s.version.CryptoStreamID()
+	flowController := flowcontrol.NewStreamFlowController(
+		id,
+		s.version.StreamContributesToConnectionFlowControl(id),
+		s.connFlowController,
+		protocol.ReceiveStreamFlowControlWindow,
+		protocol.ByteCount(s.config.MaxReceiveStreamFlowControlWindow),
+		0,
+		s.rttStats,
+	)
+	return newCryptoStream(s.scheduleSending, flowController, s.version)
+}
+
 func (s *session) sendPublicReset(rejectedPacketNumber protocol.PacketNumber) error {
 	utils.Infof("Sending public reset for connection %x, packet number %d", s.connectionID, rejectedPacketNumber)
 	return s.conn.Write(wire.WritePublicReset(s.connectionID, rejectedPacketNumber, 0))
@@ -955,7 +965,7 @@ func (s *session) handshakeStatus() <-chan handshakeEvent {
 	return s.handshakeChan
 }
 
-func (s *session) getCryptoStream() cryptoStream {
+func (s *session) getCryptoStream() cryptoStreamI {
 	return s.cryptoStream
 }
 
