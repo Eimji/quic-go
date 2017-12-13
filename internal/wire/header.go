@@ -43,7 +43,7 @@ func ParseHeaderSentByServer(b *bytes.Reader, version protocol.VersionNumber) (*
 	_ = b.UnreadByte() // unread the type byte
 
 	var isPublicHeader bool
-	if typeByte&0xC0 == 0xC0 { // gQUIC always has 0x40 unset. IETF Long Header or Version Negotiation
+	if typeByte&0xc0 == 0xc0 { // gQUIC always has 0x40 unset. IETF Long Header or Version Negotiation
 		isPublicHeader = false
 		//} else if typeByte&0xcf == 0x9 { // gQUIC Version Negotiation Packet 11001111 & typeByte== 00|**|1001 => 00001001 (0x9)
 	} else if typeByte&0x4f == 0x9 {

@@ -53,7 +53,7 @@ var _ = Describe("IETF draft Header", func() {
 		Context("long headers", func() {
 			generatePacket := func(t protocol.PacketType) []byte {
 				return []byte{
-					0xFF ^ uint8(t),
+					0xFF ^ uint8(t-1),
 					0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0x13, 0x37, // connection ID
 					0x1, 0x2, 0x3, 0x4, // version number
 					0xde, 0xca, 0xfb, 0xad, // packet number
@@ -214,7 +214,7 @@ var _ = Describe("IETF draft Header", func() {
 			It("writes", func() {
 				err := (&Header{
 					IsLongHeader: true,
-					Type:         0x3,
+					Type:         0x4,
 					ConnectionID: 0xdeadbeefcafe1337,
 					PacketNumber: 0xdecafbad,
 					Version:      0x1020304,

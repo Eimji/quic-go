@@ -60,7 +60,7 @@ func parseLongHeader(b *bytes.Reader, sentBy protocol.Perspective, typeByte byte
 		return h, nil
 	}
 	h.IsLongHeader = true
-	h.Type = protocol.PacketType(typeByte ^ 0xff)
+	h.Type = protocol.PacketType((typeByte ^ 0xff) + 1)
 	if sentBy == protocol.PerspectiveClient && (h.Type != protocol.PacketTypeInitial && h.Type != protocol.PacketTypeHandshake && h.Type != protocol.PacketType0RTT) {
 		return nil, qerr.Error(qerr.InvalidPacketHeader, fmt.Sprintf("Received packet with invalid packet type: %d", h.Type))
 	}
@@ -105,7 +105,7 @@ func (h *Header) writeHeader(b *bytes.Buffer) error {
 
 // TODO: add support for the key phase
 func (h *Header) writeLongHeader(b *bytes.Buffer) error {
-	b.WriteByte(byte(h.Type ^ 0xFF))
+	b.WriteByte(byte((h.Type - 1) ^ 0xFF))
 	utils.BigEndian.WriteUint64(b, uint64(h.ConnectionID))
 	utils.BigEndian.WriteUint32(b, uint32(h.Version))
 	utils.BigEndian.WriteUint32(b, uint32(h.PacketNumber))
