@@ -17,15 +17,15 @@ import (
 type streamI interface {
 	Stream
 
-	AddStreamFrame(*wire.StreamFrame) error
-	RegisterRemoteError(error, protocol.ByteCount) error
+	HandleStreamFrame(*wire.StreamFrame) error
+	HandleRstStreamFrame(*wire.RstStreamFrame) error
 	PopStreamFrame(maxBytes protocol.ByteCount) *wire.StreamFrame
 	Finished() bool
-	Cancel(error)
+	CloseForShutdown(error)
 	// methods needed for flow control
 	GetWindowUpdate() protocol.ByteCount
-	UpdateSendWindow(protocol.ByteCount)
-	IsFlowControlBlocked() bool
+	HandleMaxStreamDataFrame(*wire.MaxStreamDataFrame)
+	IsFlowControlBlocked() (bool, protocol.ByteCount)
 }
 
 // A Stream assembles the data from StreamFrames and provides a super-convenient Read-Interface
@@ -38,9 +38,11 @@ type stream struct {
 	ctxCancel context.CancelFunc
 
 	streamID protocol.StreamID
-	onData   func()
-	// onReset is a callback that should send a RST_STREAM
-	onReset func(protocol.StreamID, protocol.ByteCount)
+	// onData tells the session that there's stuff to pack into a new packet
+	onData func()
+	// queueControlFrame queues a new control frame for sending
+	// it does not call onData
+	queueControlFrame func(wire.Frame)
 
 	readPosInFrame int
 	writeOffset    protocol.ByteCount
@@ -49,15 +51,15 @@ type stream struct {
 	// Once set, the errors must not be changed!
 	err error
 
-	// cancelled is set when Cancel() is called
-	cancelled utils.AtomicBool
+	// closedForShutdown is set when Cancel() is called
+	closedForShutdown utils.AtomicBool
 	// finishedReading is set once we read a frame with a FinBit
 	finishedReading utils.AtomicBool
 	// finisedWriting is set once Close() is called
 	finishedWriting utils.AtomicBool
 	// resetLocally is set if Reset() is called
 	resetLocally utils.AtomicBool
-	// resetRemotely is set if RegisterRemoteError() is called
+	// resetRemotely is set if HandleRstStreamFrame() is called
 	resetRemotely utils.AtomicBool
 
 	frameQueue   *streamFrameSorter
@@ -88,19 +90,19 @@ var errDeadline net.Error = &deadlineError{}
 // newStream creates a new Stream
 func newStream(StreamID protocol.StreamID,
 	onData func(),
-	onReset func(protocol.StreamID, protocol.ByteCount),
+	queueControlFrame func(wire.Frame),
 	flowController flowcontrol.StreamFlowController,
 	version protocol.VersionNumber,
 ) *stream {
 	s := &stream{
-		onData:         onData,
-		onReset:        onReset,
-		streamID:       StreamID,
-		flowController: flowController,
-		frameQueue:     newStreamFrameSorter(),
-		readChan:       make(chan struct{}, 1),
-		writeChan:      make(chan struct{}, 1),
-		version:        version,
+		onData:            onData,
+		queueControlFrame: queueControlFrame,
+		streamID:          StreamID,
+		flowController:    flowController,
+		frameQueue:        newStreamFrameSorter(),
+		readChan:          make(chan struct{}, 1),
+		writeChan:         make(chan struct{}, 1),
+		version:           version,
 	}
 	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
 	return s
@@ -111,7 +113,7 @@ func (s *stream) Read(p []byte) (int, error) {
 	s.mutex.Lock()
 	err := s.err
 	s.mutex.Unlock()
-	if s.cancelled.Get() || s.resetLocally.Get() {
+	if s.closedForShutdown.Get() || s.resetLocally.Get() {
 		return 0, err
 	}
 	if s.finishedReading.Get() {
@@ -131,7 +133,7 @@ func (s *stream) Read(p []byte) (int, error) {
 		var err error
 		for {
 			// Stop waiting on errors
-			if s.resetLocally.Get() || s.cancelled.Get() {
+			if s.resetLocally.Get() || s.closedForShutdown.Get() {
 				err = s.err
 				break
 			}
@@ -241,13 +243,10 @@ func (s *stream) Write(p []byte) (int, error) {
 		s.mutex.Lock()
 	}
 
-	if err != nil {
-		return 0, err
-	}
 	if s.err != nil {
-		return len(p) - len(s.dataForWriting), s.err
+		err = s.err
 	}
-	return len(p), nil
+	return len(p) - len(s.dataForWriting), err
 }
 
 func (s *stream) GetWriteOffset() protocol.ByteCount {
@@ -325,8 +324,8 @@ func (s *stream) shouldSendReset() bool {
 	return (s.resetLocally.Get() || s.resetRemotely.Get()) && !s.finishedWriteAndSentFin()
 }
 
-// AddStreamFrame adds a new stream frame
-func (s *stream) AddStreamFrame(frame *wire.StreamFrame) error {
+// HandleStreamFrame adds a new stream frame
+func (s *stream) HandleStreamFrame(frame *wire.StreamFrame) error {
 	maxOffset := frame.Offset + frame.DataLen()
 	if err := s.flowController.UpdateHighestReceived(maxOffset, frame.FinBit); err != nil {
 		return err
@@ -388,14 +387,15 @@ func (s *stream) SetDeadline(t time.Time) error {
 
 // CloseRemote makes the stream receive a "virtual" FIN stream frame at a given offset
 func (s *stream) CloseRemote(offset protocol.ByteCount) {
-	s.AddStreamFrame(&wire.StreamFrame{FinBit: true, Offset: offset})
+	s.HandleStreamFrame(&wire.StreamFrame{FinBit: true, Offset: offset})
 }
 
-// Cancel is called by session to indicate that an error occurred
-// The stream should will be closed immediately
-func (s *stream) Cancel(err error) {
+// CloseForShutdown closes a stream abruptly.
+// It makes Read and Write unblock (and return the error) immediately.
+// The peer will NOT be informed about this: the stream is closed without sending a FIN or RST.
+func (s *stream) CloseForShutdown(err error) {
 	s.mutex.Lock()
-	s.cancelled.Set(true)
+	s.closedForShutdown.Set(true)
 	s.ctxCancel()
 	// errors must not be changed!
 	if s.err == nil {
@@ -421,14 +421,17 @@ func (s *stream) Reset(err error) {
 		s.signalWrite()
 	}
 	if s.shouldSendReset() {
-		s.onReset(s.streamID, s.writeOffset)
+		s.queueControlFrame(&wire.RstStreamFrame{
+			StreamID:   s.streamID,
+			ByteOffset: s.writeOffset,
+		})
+		s.onData()
 		s.rstSent.Set(true)
 	}
 	s.mutex.Unlock()
 }
 
-// resets the stream remotely
-func (s *stream) RegisterRemoteError(err error, offset protocol.ByteCount) error {
+func (s *stream) HandleRstStreamFrame(frame *wire.RstStreamFrame) error {
 	if s.resetRemotely.Get() {
 		return nil
 	}
@@ -437,14 +440,18 @@ func (s *stream) RegisterRemoteError(err error, offset protocol.ByteCount) error
 	s.ctxCancel()
 	// errors must not be changed!
 	if s.err == nil {
-		s.err = err
+		s.err = fmt.Errorf("RST_STREAM received with code %d", frame.ErrorCode)
 		s.signalWrite()
 	}
-	if err := s.flowController.UpdateHighestReceived(offset, true); err != nil {
+	if err := s.flowController.UpdateHighestReceived(frame.ByteOffset, true); err != nil {
 		return err
 	}
 	if s.shouldSendReset() {
-		s.onReset(s.streamID, s.writeOffset)
+		s.queueControlFrame(&wire.RstStreamFrame{
+			StreamID:   s.streamID,
+			ByteOffset: s.writeOffset,
+		})
+		s.onData()
 		s.rstSent.Set(true)
 	}
 	s.mutex.Unlock()
@@ -456,7 +463,7 @@ func (s *stream) finishedWriteAndSentFin() bool {
 }
 
 func (s *stream) Finished() bool {
-	return s.cancelled.Get() ||
+	return s.closedForShutdown.Get() ||
 		(s.finishedReading.Get() && s.finishedWriteAndSentFin()) ||
 		(s.resetRemotely.Get() && s.rstSent.Get()) ||
 		(s.finishedReading.Get() && s.rstSent.Get()) ||
@@ -471,11 +478,11 @@ func (s *stream) StreamID() protocol.StreamID {
 	return s.streamID
 }
 
-func (s *stream) UpdateSendWindow(n protocol.ByteCount) {
-	s.flowController.UpdateSendWindow(n)
+func (s *stream) HandleMaxStreamDataFrame(frame *wire.MaxStreamDataFrame) {
+	s.flowController.UpdateSendWindow(frame.ByteOffset)
 }
 
-func (s *stream) IsFlowControlBlocked() bool {
+func (s *stream) IsFlowControlBlocked() (bool, protocol.ByteCount) {
 	return s.flowController.IsBlocked()
 }
 

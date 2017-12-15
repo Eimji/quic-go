@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -532,8 +531,7 @@ func (s *session) handleFrames(fs []wire.Frame, encLevel protocol.EncryptionLeve
 			s.closeRemote(qerr.Error(frame.ErrorCode, frame.ReasonPhrase))
 		case *wire.GoawayFrame:
 			err = errors.New("unimplemented: handling GOAWAY frames")
-		case *wire.StopWaitingFrame:
-			s.receivedPacketHandler.IgnoreBelow(frame.LeastUnacked)
+		case *wire.StopWaitingFrame: // ignore STOP_WAITINGs
 		case *wire.RstStreamFrame:
 			err = s.handleRstStreamFrame(frame)
 		case *wire.MaxDataFrame:
@@ -574,7 +572,7 @@ func (s *session) handleStreamFrame(frame *wire.StreamFrame) error {
 		if frame.FinBit {
 			return errors.New("Received STREAM frame with FIN bit for the crypto stream")
 		}
-		return s.cryptoStream.AddStreamFrame(frame)
+		return s.cryptoStream.HandleStreamFrame(frame)
 	}
 	str, err := s.streamsMap.GetOrOpenStream(frame.StreamID)
 	if err != nil {
@@ -585,7 +583,7 @@ func (s *session) handleStreamFrame(frame *wire.StreamFrame) error {
 		// ignore this StreamFrame
 		return nil
 	}
-	return str.AddStreamFrame(frame)
+	return str.HandleStreamFrame(frame)
 }
 
 func (s *session) handleMaxDataFrame(frame *wire.MaxDataFrame) {
@@ -594,7 +592,7 @@ func (s *session) handleMaxDataFrame(frame *wire.MaxDataFrame) {
 
 func (s *session) handleMaxStreamDataFrame(frame *wire.MaxStreamDataFrame) error {
 	if frame.StreamID == s.version.CryptoStreamID() {
-		s.cryptoStream.UpdateSendWindow(frame.ByteOffset)
+		s.cryptoStream.HandleMaxStreamDataFrame(frame)
 		return nil
 	}
 	str, err := s.streamsMap.GetOrOpenStream(frame.StreamID)
@@ -605,7 +603,7 @@ func (s *session) handleMaxStreamDataFrame(frame *wire.MaxStreamDataFrame) error
 		// stream is closed and already garbage collected
 		return nil
 	}
-	str.UpdateSendWindow(frame.ByteOffset)
+	str.HandleMaxStreamDataFrame(frame)
 	return nil
 }
 
@@ -621,11 +619,15 @@ func (s *session) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
 		// stream is closed and already garbage collected
 		return nil
 	}
-	return str.RegisterRemoteError(fmt.Errorf("RST_STREAM received with code %d", frame.ErrorCode), frame.ByteOffset)
+	return str.HandleRstStreamFrame(frame)
 }
 
 func (s *session) handleAckFrame(frame *wire.AckFrame, encLevel protocol.EncryptionLevel) error {
-	return s.sentPacketHandler.ReceivedAck(frame, s.lastRcvdPacketNumber, encLevel, s.lastNetworkActivityTime)
+	if err := s.sentPacketHandler.ReceivedAck(frame, s.lastRcvdPacketNumber, encLevel, s.lastNetworkActivityTime); err != nil {
+		return err
+	}
+	s.receivedPacketHandler.IgnoreBelow(s.sentPacketHandler.GetLowestPacketNotConfirmedAcked())
+	return nil
 }
 
 func (s *session) closeLocal(e error) {
@@ -665,7 +667,7 @@ func (s *session) handleCloseError(closeErr closeError) error {
 		utils.Errorf("Closing session with error: %s", closeErr.err.Error())
 	}
 
-	s.cryptoStream.Cancel(quicErr)
+	s.cryptoStream.CloseForShutdown(quicErr)
 	s.streamsMap.CloseWithError(quicErr)
 
 	if closeErr.err == errCloseSessionForNewVersion || closeErr.err == handshake.ErrCloseSessionForRetry {
@@ -692,8 +694,12 @@ func (s *session) processTransportParameters(params *handshake.TransportParamete
 		s.packer.SetOmitConnectionID()
 	}
 	s.connFlowController.UpdateSendWindow(params.ConnectionFlowControlWindow)
+	// increase the flow control windows of all streams by sending them a fake MAX_STREAM_DATA frame
 	s.streamsMap.Range(func(str streamI) {
-		str.UpdateSendWindow(params.StreamFlowControlWindow)
+		str.HandleMaxStreamDataFrame(&wire.MaxStreamDataFrame{
+			StreamID:   str.StreamID(),
+			ByteOffset: params.StreamFlowControlWindow,
+		})
 	})
 }
 
@@ -718,9 +724,10 @@ func (s *session) sendPacket() error {
 				return nil
 			}
 			// If we aren't allowed to send, at least try sending an ACK frame
-			swf := s.sentPacketHandler.GetStopWaitingFrame(false)
-			if swf != nil {
-				s.packer.QueueControlFrame(swf)
+			if !s.version.UsesIETFFrameFormat() {
+				if swf := s.sentPacketHandler.GetStopWaitingFrame(false); swf != nil {
+					s.packer.QueueControlFrame(swf)
+				}
 			}
 			packet, err := s.packer.PackAckPacket()
 			if err != nil {
@@ -742,7 +749,9 @@ func (s *session) sendPacket() error {
 					continue
 				}
 				utils.Debugf("\tDequeueing handshake retransmission for packet 0x%x", retransmitPacket.PacketNumber)
-				s.packer.QueueControlFrame(s.sentPacketHandler.GetStopWaitingFrame(true))
+				if !s.version.UsesIETFFrameFormat() {
+					s.packer.QueueControlFrame(s.sentPacketHandler.GetStopWaitingFrame(true))
+				}
 				packet, err := s.packer.PackHandshakeRetransmission(retransmitPacket)
 				if err != nil {
 					return err
@@ -766,9 +775,8 @@ func (s *session) sendPacket() error {
 		}
 
 		hasRetransmission := s.streamFramer.HasFramesForRetransmission()
-		if ack != nil || hasRetransmission {
-			swf := s.sentPacketHandler.GetStopWaitingFrame(hasRetransmission)
-			if swf != nil {
+		if !s.version.UsesIETFFrameFormat() && (ack != nil || hasRetransmission) {
+			if swf := s.sentPacketHandler.GetStopWaitingFrame(hasRetransmission); swf != nil {
 				s.packer.QueueControlFrame(swf)
 			}
 		}
@@ -857,14 +865,6 @@ func (s *session) WaitUntilHandshakeComplete() error {
 	return <-s.handshakeCompleteChan
 }
 
-func (s *session) queueResetStreamFrame(id protocol.StreamID, offset protocol.ByteCount) {
-	s.packer.QueueControlFrame(&wire.RstStreamFrame{
-		StreamID:   id,
-		ByteOffset: offset,
-	})
-	s.scheduleSending()
-}
-
 func (s *session) newStream(id protocol.StreamID) streamI {
 	var initialSendWindow protocol.ByteCount
 	if s.peerParams != nil {
@@ -879,7 +879,7 @@ func (s *session) newStream(id protocol.StreamID) streamI {
 		initialSendWindow,
 		s.rttStats,
 	)
-	return newStream(id, s.scheduleSending, s.queueResetStreamFrame, flowController, s.version)
+	return newStream(id, s.scheduleSending, s.packer.QueueControlFrame, flowController, s.version)
 }
 
 func (s *session) newCryptoStream() cryptoStreamI {

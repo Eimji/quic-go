@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/lucas-clemente/quic-go/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
@@ -27,7 +28,9 @@ type packetPacker struct {
 	packetNumberGenerator *packetNumberGenerator
 	streamFramer          *streamFramer
 
-	controlFrames                 []wire.Frame
+	controlFrameMutex sync.Mutex
+	controlFrames     []wire.Frame
+
 	stopWaiting                   *wire.StopWaitingFrame
 	ackFrame                      *wire.AckFrame
 	leastUnacked                  protocol.PacketNumber
@@ -75,7 +78,7 @@ func (p *packetPacker) PackAckPacket() (*packedPacket, error) {
 	encLevel, sealer := p.cryptoSetup.GetSealer()
 	header := p.getHeader(encLevel)
 	frames := []wire.Frame{p.ackFrame}
-	if p.stopWaiting != nil {
+	if p.stopWaiting != nil { // a STOP_WAITING will only be queued when using gQUIC
 		p.stopWaiting.PacketNumber = header.PacketNumber
 		p.stopWaiting.PacketNumberLen = header.PacketNumberLen
 		frames = append(frames, p.stopWaiting)
@@ -100,14 +103,20 @@ func (p *packetPacker) PackHandshakeRetransmission(packet *ackhandler.Packet) (*
 	if err != nil {
 		return nil, err
 	}
-	if p.stopWaiting == nil {
-		return nil, errors.New("PacketPacker BUG: Handshake retransmissions must contain a StopWaitingFrame")
-	}
 	header := p.getHeader(packet.EncryptionLevel)
-	p.stopWaiting.PacketNumber = header.PacketNumber
-	p.stopWaiting.PacketNumberLen = header.PacketNumberLen
-	frames := append([]wire.Frame{p.stopWaiting}, packet.Frames...)
-	p.stopWaiting = nil
+	var frames []wire.Frame
+	if !p.version.UsesIETFFrameFormat() { // for gQUIC: pack a STOP_WAITING first
+		if p.stopWaiting == nil {
+			return nil, errors.New("PacketPacker BUG: Handshake retransmissions must contain a STOP_WAITING frame")
+		}
+		swf := p.stopWaiting
+		swf.PacketNumber = header.PacketNumber
+		swf.PacketNumberLen = header.PacketNumberLen
+		p.stopWaiting = nil
+		frames = append([]wire.Frame{swf}, packet.Frames...)
+	} else {
+		frames = packet.Frames
+	}
 	raw, err := p.writeAndSealPacket(header, frames, sealer)
 	return &packedPacket{
 		header:          header,
@@ -210,16 +219,17 @@ func (p *packetPacker) composeNextPacket(
 	var payloadFrames []wire.Frame
 
 	// STOP_WAITING and ACK will always fit
-	if p.stopWaiting != nil {
-		payloadFrames = append(payloadFrames, p.stopWaiting)
-		payloadLength += p.stopWaiting.MinLength(p.version)
-	}
-	if p.ackFrame != nil {
+	if p.ackFrame != nil { // ACKs need to go first, so that the sentPacketHandler will recognize them
 		payloadFrames = append(payloadFrames, p.ackFrame)
 		l := p.ackFrame.MinLength(p.version)
 		payloadLength += l
 	}
+	if p.stopWaiting != nil { // a STOP_WAITING will only be queued when using gQUIC
+		payloadFrames = append(payloadFrames, p.stopWaiting)
+		payloadLength += p.stopWaiting.MinLength(p.version)
+	}
 
+	p.controlFrameMutex.Lock()
 	for len(p.controlFrames) > 0 {
 		frame := p.controlFrames[len(p.controlFrames)-1]
 		minLength := frame.MinLength(p.version)
@@ -230,6 +240,7 @@ func (p *packetPacker) composeNextPacket(
 		payloadLength += minLength
 		p.controlFrames = p.controlFrames[:len(p.controlFrames)-1]
 	}
+	p.controlFrameMutex.Unlock()
 
 	if payloadLength > maxFrameSize {
 		return nil, fmt.Errorf("Packet Packer BUG: packet payload (%d) too large (%d)", payloadLength, maxFrameSize)
@@ -261,7 +272,9 @@ func (p *packetPacker) composeNextPacket(
 	}
 
 	for b := p.streamFramer.PopBlockedFrame(); b != nil; b = p.streamFramer.PopBlockedFrame() {
+		p.controlFrameMutex.Lock()
 		p.controlFrames = append(p.controlFrames, b)
+		p.controlFrameMutex.Unlock()
 	}
 
 	return payloadFrames, nil
@@ -274,7 +287,9 @@ func (p *packetPacker) QueueControlFrame(frame wire.Frame) {
 	case *wire.AckFrame:
 		p.ackFrame = f
 	default:
+		p.controlFrameMutex.Lock()
 		p.controlFrames = append(p.controlFrames, f)
+		p.controlFrameMutex.Unlock()
 	}
 }
 

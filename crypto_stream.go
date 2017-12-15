@@ -11,15 +11,15 @@ import (
 type cryptoStreamI interface {
 	io.Reader
 	io.Writer
-	AddStreamFrame(*wire.StreamFrame) error
+	HandleStreamFrame(*wire.StreamFrame) error
 	PopStreamFrame(protocol.ByteCount) *wire.StreamFrame
-	Cancel(error)
+	CloseForShutdown(error)
 	HasDataForWriting() bool
 	SetReadOffset(protocol.ByteCount)
 	// methods needed for flow control
 	GetWindowUpdate() protocol.ByteCount
-	UpdateSendWindow(protocol.ByteCount)
-	IsFlowControlBlocked() bool
+	HandleMaxStreamDataFrame(*wire.MaxStreamDataFrame)
+	IsFlowControlBlocked() (bool, protocol.ByteCount)
 }
 
 type cryptoStream struct {
