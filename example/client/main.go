@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
+	_tls "crypto/tls"
 	"crypto/x509"
 	"flag"
 	"io"
@@ -53,7 +53,7 @@ func main() {
 	caCertPool.AppendCertsFromPEM(caCert)
 
 	// Setup HTTPS client
-	tlsConfig := &tls.Config{
+	tlsConfig := &_tls.Config{
 		RootCAs: caCertPool,
 	}
 	tlsConfig.BuildNameToCertificate()
