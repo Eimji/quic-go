@@ -102,9 +102,6 @@ func (c *streamFlowController) AddBytesSent(n protocol.ByteCount) {
 }
 
 func (c *streamFlowController) SendWindowSize() protocol.ByteCount {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	window := c.baseFlowController.sendWindowSize()
 	if c.contributesToConnection {
 		window = utils.MinByteCount(window, c.connection.SendWindowSize())
@@ -113,11 +110,11 @@ func (c *streamFlowController) SendWindowSize() protocol.ByteCount {
 }
 
 func (c *streamFlowController) GetWindowUpdate() protocol.ByteCount {
+	// don't use defer for unlocking the mutex here, GetWindowUpdate() is called frequently and defer shows up in the profiler
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	// if we already received the final offset for this stream, the peer won't need any additional flow control credit
 	if c.receivedFinalOffset {
+		c.mutex.Unlock()
 		return 0
 	}
 
@@ -129,5 +126,6 @@ func (c *streamFlowController) GetWindowUpdate() protocol.ByteCount {
 			c.connection.EnsureMinimumWindowIncrement(protocol.ByteCount(float64(c.receiveWindowIncrement) * protocol.ConnectionFlowControlMultiplier))
 		}
 	}
+	c.mutex.Unlock()
 	return offset
 }

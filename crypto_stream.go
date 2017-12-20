@@ -11,15 +11,14 @@ import (
 type cryptoStreamI interface {
 	io.Reader
 	io.Writer
-	HandleStreamFrame(*wire.StreamFrame) error
-	PopStreamFrame(protocol.ByteCount) *wire.StreamFrame
-	CloseForShutdown(error)
-	HasDataForWriting() bool
-	SetReadOffset(protocol.ByteCount)
+	handleStreamFrame(*wire.StreamFrame) error
+	popStreamFrame(protocol.ByteCount) *wire.StreamFrame
+	closeForShutdown(error)
+	hasDataForWriting() bool
+	setReadOffset(protocol.ByteCount)
 	// methods needed for flow control
-	GetWindowUpdate() protocol.ByteCount
-	HandleMaxStreamDataFrame(*wire.MaxStreamDataFrame)
-	IsFlowControlBlocked() (bool, protocol.ByteCount)
+	getWindowUpdate() protocol.ByteCount
+	handleMaxStreamDataFrame(*wire.MaxStreamDataFrame)
 }
 
 type cryptoStream struct {
@@ -36,14 +35,14 @@ func newCryptoStream(onData func(), flowController flowcontrol.StreamFlowControl
 // SetReadOffset sets the read offset.
 // It is only needed for the crypto stream.
 // It must not be called concurrently with any other stream methods, especially Read and Write.
-func (s *cryptoStream) SetReadOffset(offset protocol.ByteCount) {
-	s.readOffset = offset
-	s.frameQueue.readPosition = offset
+func (s *cryptoStream) setReadOffset(offset protocol.ByteCount) {
+	s.receiveStream.readOffset = offset
+	s.receiveStream.frameQueue.readPosition = offset
 }
 
-func (s *cryptoStream) HasDataForWriting() bool {
-	s.mutex.Lock()
-	hasData := s.dataForWriting != nil
-	s.mutex.Unlock()
+func (s *cryptoStream) hasDataForWriting() bool {
+	s.sendStream.mutex.Lock()
+	hasData := s.sendStream.dataForWriting != nil
+	s.sendStream.mutex.Unlock()
 	return hasData
 }

@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 )
@@ -11,23 +10,18 @@ type streamFramer struct {
 	cryptoStream cryptoStreamI
 	version      protocol.VersionNumber
 
-	connFlowController flowcontrol.ConnectionFlowController
-
 	retransmissionQueue []*wire.StreamFrame
-	blockedFrameQueue   []wire.Frame
 }
 
 func newStreamFramer(
 	cryptoStream cryptoStreamI,
 	streamsMap *streamsMap,
-	cfc flowcontrol.ConnectionFlowController,
 	v protocol.VersionNumber,
 ) *streamFramer {
 	return &streamFramer{
-		streamsMap:         streamsMap,
-		cryptoStream:       cryptoStream,
-		connFlowController: cfc,
-		version:            v,
+		streamsMap:   streamsMap,
+		cryptoStream: cryptoStream,
+		version:      v,
 	}
 }
 
@@ -40,26 +34,17 @@ func (f *streamFramer) PopStreamFrames(maxLen protocol.ByteCount) []*wire.Stream
 	return append(fs, f.maybePopNormalFrames(maxLen-currentLen)...)
 }
 
-func (f *streamFramer) PopBlockedFrame() wire.Frame {
-	if len(f.blockedFrameQueue) == 0 {
-		return nil
-	}
-	frame := f.blockedFrameQueue[0]
-	f.blockedFrameQueue = f.blockedFrameQueue[1:]
-	return frame
-}
-
 func (f *streamFramer) HasFramesForRetransmission() bool {
 	return len(f.retransmissionQueue) > 0
 }
 
 func (f *streamFramer) HasCryptoStreamFrame() bool {
-	return f.cryptoStream.HasDataForWriting()
+	return f.cryptoStream.hasDataForWriting()
 }
 
 // TODO(lclemente): This is somewhat duplicate with the normal path for generating frames.
 func (f *streamFramer) PopCryptoStreamFrame(maxLen protocol.ByteCount) *wire.StreamFrame {
-	return f.cryptoStream.PopStreamFrame(maxLen)
+	return f.cryptoStream.popStreamFrame(maxLen)
 }
 
 func (f *streamFramer) maybePopFramesForRetransmission(maxTotalLen protocol.ByteCount) (res []*wire.StreamFrame, currentLen protocol.ByteCount) {
@@ -99,32 +84,15 @@ func (f *streamFramer) maybePopNormalFrames(maxTotalLen protocol.ByteCount) (res
 		if maxLen < protocol.MinStreamFrameSize { // don't try to add new STREAM frames, if only little space is left in the packet
 			return false, nil
 		}
-		frame := s.PopStreamFrame(maxLen)
+		frame := s.popStreamFrame(maxLen)
 		if frame == nil {
 			return true, nil
 		}
-
-		// Finally, check if we are now FC blocked and should queue a BLOCKED frame
-		if !frame.FinBit {
-			if blocked, offset := s.IsFlowControlBlocked(); blocked {
-				f.blockedFrameQueue = append(f.blockedFrameQueue, &wire.StreamBlockedFrame{
-					StreamID: s.StreamID(),
-					Offset:   offset,
-				})
-			}
-		}
-		if blocked, offset := f.connFlowController.IsBlocked(); blocked {
-			f.blockedFrameQueue = append(f.blockedFrameQueue, &wire.BlockedFrame{Offset: offset})
-		}
-
 		res = append(res, frame)
 		currentLen += frame.MinLength(f.version) + frame.DataLen()
-
 		if currentLen == maxTotalLen {
 			return false, nil
 		}
-
-		frame = &wire.StreamFrame{DataLenPresent: true}
 		return true, nil
 	}
 

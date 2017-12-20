@@ -34,9 +34,6 @@ func NewConnectionFlowController(
 }
 
 func (c *connectionFlowController) SendWindowSize() protocol.ByteCount {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
 	return c.baseFlowController.sendWindowSize()
 }
 
@@ -54,13 +51,12 @@ func (c *connectionFlowController) IncrementHighestReceived(increment protocol.B
 
 func (c *connectionFlowController) GetWindowUpdate() protocol.ByteCount {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	oldWindowIncrement := c.receiveWindowIncrement
 	offset := c.baseFlowController.getWindowUpdate()
 	if oldWindowIncrement < c.receiveWindowIncrement {
 		utils.Debugf("Increasing receive flow control window for the connection to %d kB", c.receiveWindowIncrement/(1<<10))
 	}
+	c.mutex.Unlock()
 	return offset
 }
 
@@ -68,10 +64,9 @@ func (c *connectionFlowController) GetWindowUpdate() protocol.ByteCount {
 // it should make sure that the connection-level window is increased when a stream-level window grows
 func (c *connectionFlowController) EnsureMinimumWindowIncrement(inc protocol.ByteCount) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	if inc > c.receiveWindowIncrement {
 		c.receiveWindowIncrement = utils.MinByteCount(inc, c.maxReceiveWindowIncrement)
 		c.lastWindowUpdateTime = time.Time{} // disables autotuning for the next window update
 	}
+	c.mutex.Unlock()
 }

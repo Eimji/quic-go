@@ -193,10 +193,10 @@ var _ = Describe("Session", func() {
 	Context("frame handling", func() {
 		BeforeEach(func() {
 			sess.streamsMap.newStream = func(id protocol.StreamID) streamI {
-				str := mocks.NewMockStreamI(mockCtrl)
+				str := NewMockStreamI(mockCtrl)
 				str.EXPECT().StreamID().Return(id).AnyTimes()
 				if id == 1 {
-					str.EXPECT().Finished().AnyTimes()
+					str.EXPECT().finished().AnyTimes()
 				}
 				return str
 			}
@@ -216,7 +216,7 @@ var _ = Describe("Session", func() {
 				sess.streamsMap.newStream = func(id protocol.StreamID) streamI {
 					str := newStreamLambda(id)
 					if id == 5 {
-						str.(*mocks.MockStreamI).EXPECT().HandleStreamFrame(f)
+						str.(*MockStreamI).EXPECT().handleStreamFrame(f)
 					}
 					return str
 				}
@@ -241,8 +241,8 @@ var _ = Describe("Session", func() {
 				sess.streamsMap.newStream = func(id protocol.StreamID) streamI {
 					str := newStreamLambda(id)
 					if id == 5 {
-						str.(*mocks.MockStreamI).EXPECT().HandleStreamFrame(f1)
-						str.(*mocks.MockStreamI).EXPECT().HandleStreamFrame(f2)
+						str.(*MockStreamI).EXPECT().handleStreamFrame(f1)
+						str.(*MockStreamI).EXPECT().handleStreamFrame(f2)
 					}
 					return str
 				}
@@ -308,7 +308,7 @@ var _ = Describe("Session", func() {
 				}
 				str, err := sess.GetOrOpenStream(5)
 				Expect(err).ToNot(HaveOccurred())
-				str.(*mocks.MockStreamI).EXPECT().HandleRstStreamFrame(f)
+				str.(*MockStreamI).EXPECT().handleRstStreamFrame(f)
 				err = sess.handleRstStreamFrame(f)
 				Expect(err).ToNot(HaveOccurred())
 			})
@@ -321,7 +321,7 @@ var _ = Describe("Session", func() {
 				testErr := errors.New("flow control violation")
 				str, err := sess.GetOrOpenStream(5)
 				Expect(err).ToNot(HaveOccurred())
-				str.(*mocks.MockStreamI).EXPECT().HandleRstStreamFrame(f).Return(testErr)
+				str.(*MockStreamI).EXPECT().handleRstStreamFrame(f).Return(testErr)
 				err = sess.handleRstStreamFrame(f)
 				Expect(err).To(MatchError(testErr))
 			})
@@ -329,7 +329,7 @@ var _ = Describe("Session", func() {
 			It("ignores the error when the stream is not known", func() {
 				str, err := sess.GetOrOpenStream(3)
 				Expect(err).ToNot(HaveOccurred())
-				str.(*mocks.MockStreamI).EXPECT().Finished().Return(true)
+				str.(*MockStreamI).EXPECT().finished().Return(true)
 				sess.streamsMap.DeleteClosedStreams()
 				str, err = sess.GetOrOpenStream(3)
 				Expect(err).ToNot(HaveOccurred())
@@ -362,7 +362,7 @@ var _ = Describe("Session", func() {
 				fc := mocks.NewMockStreamFlowController(mockCtrl)
 				offset := protocol.ByteCount(0x4321)
 				fc.EXPECT().UpdateSendWindow(offset)
-				sess.cryptoStream.(*cryptoStream).flowController = fc
+				sess.cryptoStream.(*cryptoStream).sendStream.flowController = fc
 				err := sess.handleMaxStreamDataFrame(&wire.MaxStreamDataFrame{
 					StreamID:   sess.version.CryptoStreamID(),
 					ByteOffset: offset,
@@ -377,7 +377,7 @@ var _ = Describe("Session", func() {
 				}
 				str, err := sess.GetOrOpenStream(5)
 				Expect(err).ToNot(HaveOccurred())
-				str.(*mocks.MockStreamI).EXPECT().HandleMaxStreamDataFrame(f)
+				str.(*MockStreamI).EXPECT().handleMaxStreamDataFrame(f)
 				err = sess.handleMaxStreamDataFrame(f)
 				Expect(err).ToNot(HaveOccurred())
 			})
@@ -397,7 +397,7 @@ var _ = Describe("Session", func() {
 				sess.streamsMap.newStream = func(id protocol.StreamID) streamI {
 					str := newStreamLambda(id)
 					if id == 5 {
-						str.(*mocks.MockStreamI).EXPECT().HandleMaxStreamDataFrame(f)
+						str.(*MockStreamI).EXPECT().handleMaxStreamDataFrame(f)
 					}
 					return str
 				}
@@ -411,7 +411,7 @@ var _ = Describe("Session", func() {
 			It("ignores MAX_STREAM_DATA frames for a closed stream", func() {
 				str, err := sess.GetOrOpenStream(3)
 				Expect(err).ToNot(HaveOccurred())
-				str.(*mocks.MockStreamI).EXPECT().Finished().Return(true)
+				str.(*MockStreamI).EXPECT().finished().Return(true)
 				err = sess.streamsMap.DeleteClosedStreams()
 				Expect(err).ToNot(HaveOccurred())
 				str, err = sess.GetOrOpenStream(3)
@@ -420,6 +420,52 @@ var _ = Describe("Session", func() {
 				err = sess.handleFrames([]wire.Frame{&wire.MaxStreamDataFrame{
 					StreamID:   3,
 					ByteOffset: 1337,
+				}}, protocol.EncryptionUnspecified)
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("handling STOP_SENDING frames", func() {
+			It("opens a new stream when receiving a STOP_SENDING frame for an unknown stream", func() {
+				f := &wire.StopSendingFrame{
+					StreamID:  5,
+					ErrorCode: 10,
+				}
+				newStreamLambda := sess.streamsMap.newStream
+				sess.streamsMap.newStream = func(id protocol.StreamID) streamI {
+					str := newStreamLambda(id)
+					if id == 5 {
+						str.(*MockStreamI).EXPECT().handleStopSendingFrame(f)
+					}
+					return str
+				}
+				err := sess.handleStopSendingFrame(f)
+				Expect(err).ToNot(HaveOccurred())
+				str, err := sess.streamsMap.GetOrOpenStream(5)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(str).ToNot(BeNil())
+			})
+
+			It("errors when receiving a STOP_SENDING for the crypto stream", func() {
+				err := sess.handleStopSendingFrame(&wire.StopSendingFrame{
+					StreamID:  sess.version.CryptoStreamID(),
+					ErrorCode: 10,
+				})
+				Expect(err).To(MatchError("Received a STOP_SENDING frame for the crypto stream"))
+			})
+
+			It("ignores STOP_SENDING frames for a closed stream", func() {
+				str, err := sess.GetOrOpenStream(3)
+				Expect(err).ToNot(HaveOccurred())
+				str.(*MockStreamI).EXPECT().finished().Return(true)
+				err = sess.streamsMap.DeleteClosedStreams()
+				Expect(err).ToNot(HaveOccurred())
+				str, err = sess.GetOrOpenStream(3)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(str).To(BeNil())
+				err = sess.handleFrames([]wire.Frame{&wire.StopSendingFrame{
+					StreamID:  3,
+					ErrorCode: 1337,
 				}}, protocol.EncryptionUnspecified)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -456,7 +502,7 @@ var _ = Describe("Session", func() {
 			_, err := sess.GetOrOpenStream(5)
 			Expect(err).ToNot(HaveOccurred())
 			sess.streamsMap.Range(func(s streamI) {
-				s.(*mocks.MockStreamI).EXPECT().CloseForShutdown(gomock.Any())
+				s.(*MockStreamI).EXPECT().closeForShutdown(gomock.Any())
 			})
 			err = sess.handleFrames([]wire.Frame{&wire.ConnectionCloseFrame{ErrorCode: qerr.ProofInvalid, ReasonPhrase: "foobar"}}, protocol.EncryptionUnspecified)
 			Expect(err).NotTo(HaveOccurred())
@@ -811,6 +857,27 @@ var _ = Describe("Session", func() {
 			Expect(mconn.written).To(HaveLen(1))
 		})
 
+		It("adds a BLOCKED frame when it is connection-level flow control blocked", func() {
+			fc := mocks.NewMockConnectionFlowController(mockCtrl)
+			fc.EXPECT().GetWindowUpdate()
+			fc.EXPECT().IsNewlyBlocked().Return(true, protocol.ByteCount(1337))
+			sess.connFlowController = fc
+			sph := mocks.NewMockSentPacketHandler(mockCtrl)
+			sph.EXPECT().GetLeastUnacked().AnyTimes()
+			sph.EXPECT().SendingAllowed().Return(true)
+			sph.EXPECT().SendingAllowed()
+			sph.EXPECT().DequeuePacketForRetransmission()
+			sph.EXPECT().ShouldSendRetransmittablePacket()
+			sph.EXPECT().SentPacket(gomock.Any()).Do(func(p *ackhandler.Packet) {
+				Expect(p.Frames).To(Equal([]wire.Frame{
+					&wire.BlockedFrame{Offset: 1337},
+				}))
+			})
+			sess.sentPacketHandler = sph
+			err := sess.sendPacket()
+			Expect(err).ToNot(HaveOccurred())
+		})
+
 		It("sends public reset", func() {
 			err := sess.sendPublicReset(1)
 			Expect(err).NotTo(HaveOccurred())
@@ -1047,7 +1114,7 @@ var _ = Describe("Session", func() {
 				close(done)
 			}()
 			Eventually(sess.sendingScheduled).Should(Receive())
-			s.(*stream).PopStreamFrame(1000) // unblock
+			s.(*stream).popStreamFrame(1000) // unblock
 		})
 
 		It("sets the timer to the ack timer", func() {
@@ -1072,9 +1139,21 @@ var _ = Describe("Session", func() {
 				s2, err := sess.GetOrOpenStream(7)
 				Expect(err).NotTo(HaveOccurred())
 
-				// Put data directly into the streams
-				s1.(*stream).dataForWriting = []byte("foobar1")
-				s2.(*stream).dataForWriting = []byte("foobar2")
+				done1 := make(chan struct{})
+				done2 := make(chan struct{})
+				go func() {
+					defer GinkgoRecover()
+					_, err := s1.Write([]byte("foobar1"))
+					Expect(err).ToNot(HaveOccurred())
+					close(done1)
+				}()
+				go func() {
+					defer GinkgoRecover()
+					s2.Write([]byte("foobar2"))
+					Expect(err).ToNot(HaveOccurred())
+					close(done2)
+				}()
+				time.Sleep(100 * time.Millisecond) // make sure the both writes are active
 
 				sess.scheduleSending()
 				go sess.run()
@@ -1084,6 +1163,8 @@ var _ = Describe("Session", func() {
 				packet := <-mconn.written
 				Expect(packet).To(ContainSubstring("foobar1"))
 				Expect(packet).To(ContainSubstring("foobar2"))
+				Eventually(done1).Should(BeClosed())
+				Eventually(done2).Should(BeClosed())
 			})
 
 			It("sends out two big frames in two packets", func() {
@@ -1420,8 +1501,8 @@ var _ = Describe("Session", func() {
 			str, err := sess.GetOrOpenStream(9)
 			Expect(err).ToNot(HaveOccurred())
 			str.Close()
-			str.(*stream).CloseForShutdown(nil)
-			Expect(str.(*stream).Finished()).To(BeTrue())
+			str.(*stream).closeForShutdown(nil)
+			Expect(str.(*stream).finished()).To(BeTrue())
 			err = sess.streamsMap.DeleteClosedStreams()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sess.streamsMap.GetOrOpenStream(9)).To(BeNil())
@@ -1456,7 +1537,7 @@ var _ = Describe("Session", func() {
 				s, err := sess.GetOrOpenStream(protocol.StreamID(i*2 + 1))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(s.Close()).To(Succeed())
-				f := s.(*stream).PopStreamFrame(1000) // trigger "sending" of the FIN bit
+				f := s.(*stream).popStreamFrame(1000) // trigger "sending" of the FIN bit
 				Expect(f.FinBit).To(BeTrue())
 				s.(*stream).CloseRemote(0)
 				_, err = s.Read([]byte("a"))
