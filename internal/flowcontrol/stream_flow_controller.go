@@ -37,11 +37,11 @@ func NewStreamFlowController(
 		contributesToConnection: contributesToConnection,
 		connection:              cfc.(connectionFlowControllerI),
 		baseFlowController: baseFlowController{
-			rttStats:                  rttStats,
-			receiveWindow:             receiveWindow,
-			receiveWindowIncrement:    receiveWindow,
-			maxReceiveWindowIncrement: maxReceiveWindow,
-			sendWindow:                initialSendWindow,
+			rttStats:             rttStats,
+			receiveWindow:        receiveWindow,
+			receiveWindowSize:    receiveWindow,
+			maxReceiveWindowSize: maxReceiveWindow,
+			sendWindow:           initialSendWindow,
 		},
 	}
 }
@@ -109,6 +109,13 @@ func (c *streamFlowController) SendWindowSize() protocol.ByteCount {
 	return window
 }
 
+func (c *streamFlowController) HasWindowUpdate() bool {
+	c.mutex.Lock()
+	hasWindowUpdate := !c.receivedFinalOffset && c.hasWindowUpdate()
+	c.mutex.Unlock()
+	return hasWindowUpdate
+}
+
 func (c *streamFlowController) GetWindowUpdate() protocol.ByteCount {
 	// don't use defer for unlocking the mutex here, GetWindowUpdate() is called frequently and defer shows up in the profiler
 	c.mutex.Lock()
@@ -118,12 +125,12 @@ func (c *streamFlowController) GetWindowUpdate() protocol.ByteCount {
 		return 0
 	}
 
-	oldWindowIncrement := c.receiveWindowIncrement
+	oldWindowSize := c.receiveWindowSize
 	offset := c.baseFlowController.getWindowUpdate()
-	if c.receiveWindowIncrement > oldWindowIncrement { // auto-tuning enlarged the window increment
-		utils.Debugf("Increasing receive flow control window for the connection to %d kB", c.receiveWindowIncrement/(1<<10))
+	if c.receiveWindowSize > oldWindowSize { // auto-tuning enlarged the window size
+		utils.Debugf("Increasing receive flow control window for the connection to %d kB", c.receiveWindowSize/(1<<10))
 		if c.contributesToConnection {
-			c.connection.EnsureMinimumWindowIncrement(protocol.ByteCount(float64(c.receiveWindowIncrement) * protocol.ConnectionFlowControlMultiplier))
+			c.connection.EnsureMinimumWindowSize(protocol.ByteCount(float64(c.receiveWindowSize) * protocol.ConnectionFlowControlMultiplier))
 		}
 	}
 	c.mutex.Unlock()
