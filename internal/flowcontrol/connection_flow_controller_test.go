@@ -63,7 +63,7 @@ var _ = Describe("Connection Flow controller", func() {
 			It("autotunes the window", func() {
 				oldOffset := controller.bytesRead
 				oldWindowSize := controller.receiveWindowSize
-				rtt := 200 * time.Millisecond
+				rtt := scaleDuration(20 * time.Millisecond)
 				setRtt(rtt)
 				controller.epochStartTime = time.Now().Add(-time.Millisecond)
 				controller.epochStartOffset = oldOffset
@@ -74,6 +74,31 @@ var _ = Describe("Connection Flow controller", func() {
 				Expect(newWindowSize).To(Equal(2 * oldWindowSize))
 				Expect(offset).To(Equal(protocol.ByteCount(oldOffset + dataRead + newWindowSize)))
 			})
+		})
+	})
+
+	Context("send flow control", func() {
+		It("says when it's blocked", func() {
+			controller.UpdateSendWindow(100)
+			Expect(controller.IsNewlyBlocked()).To(BeFalse())
+			controller.AddBytesSent(100)
+			blocked, offset := controller.IsNewlyBlocked()
+			Expect(blocked).To(BeTrue())
+			Expect(offset).To(Equal(protocol.ByteCount(100)))
+		})
+
+		It("doesn't say that it's newly blocked multiple times for the same offset", func() {
+			controller.UpdateSendWindow(100)
+			controller.AddBytesSent(100)
+			newlyBlocked, offset := controller.IsNewlyBlocked()
+			Expect(newlyBlocked).To(BeTrue())
+			Expect(offset).To(Equal(protocol.ByteCount(100)))
+			newlyBlocked, _ = controller.IsNewlyBlocked()
+			Expect(newlyBlocked).To(BeFalse())
+			controller.UpdateSendWindow(150)
+			controller.AddBytesSent(150)
+			newlyBlocked, offset = controller.IsNewlyBlocked()
+			Expect(newlyBlocked).To(BeTrue())
 		})
 	})
 

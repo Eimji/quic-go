@@ -35,6 +35,16 @@ func (m *MockStreamSender) EXPECT() *MockStreamSenderMockRecorder {
 	return m.recorder
 }
 
+// onHasStreamData mocks base method
+func (m *MockStreamSender) onHasStreamData(arg0 protocol.StreamID) {
+	m.ctrl.Call(m, "onHasStreamData", arg0)
+}
+
+// onHasStreamData indicates an expected call of onHasStreamData
+func (mr *MockStreamSenderMockRecorder) onHasStreamData(arg0 interface{}) *gomock.Call {
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "onHasStreamData", reflect.TypeOf((*MockStreamSender)(nil).onHasStreamData), arg0)
+}
+
 // onHasWindowUpdate mocks base method
 func (m *MockStreamSender) onHasWindowUpdate(arg0 protocol.StreamID) {
 	m.ctrl.Call(m, "onHasWindowUpdate", arg0)
@@ -45,6 +55,16 @@ func (mr *MockStreamSenderMockRecorder) onHasWindowUpdate(arg0 interface{}) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "onHasWindowUpdate", reflect.TypeOf((*MockStreamSender)(nil).onHasWindowUpdate), arg0)
 }
 
+// onStreamCompleted mocks base method
+func (m *MockStreamSender) onStreamCompleted(arg0 protocol.StreamID) {
+	m.ctrl.Call(m, "onStreamCompleted", arg0)
+}
+
+// onStreamCompleted indicates an expected call of onStreamCompleted
+func (mr *MockStreamSenderMockRecorder) onStreamCompleted(arg0 interface{}) *gomock.Call {
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "onStreamCompleted", reflect.TypeOf((*MockStreamSender)(nil).onStreamCompleted), arg0)
+}
+
 // queueControlFrame mocks base method
 func (m *MockStreamSender) queueControlFrame(arg0 wire.Frame) {
 	m.ctrl.Call(m, "queueControlFrame", arg0)
@@ -53,14 +73,4 @@ func (m *MockStreamSender) queueControlFrame(arg0 wire.Frame) {
 // queueControlFrame indicates an expected call of queueControlFrame
 func (mr *MockStreamSenderMockRecorder) queueControlFrame(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "queueControlFrame", reflect.TypeOf((*MockStreamSender)(nil).queueControlFrame), arg0)
-}
-
-// scheduleSending mocks base method
-func (m *MockStreamSender) scheduleSending() {
-	m.ctrl.Call(m, "scheduleSending")
-}
-
-// scheduleSending indicates an expected call of scheduleSending
-func (mr *MockStreamSenderMockRecorder) scheduleSending() *gomock.Call {
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "scheduleSending", reflect.TypeOf((*MockStreamSender)(nil).scheduleSending))
 }

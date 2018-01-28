@@ -2,9 +2,11 @@ package quic
 
 import (
 	"bytes"
+	"crypto/tls"
 
 	"github.com/lucas-clemente/quic-go/internal/crypto"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/internal/testdata"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -31,6 +33,63 @@ var _ = Describe("Packing and unpacking Initial packets", func() {
 		err = hdr.Write(buf, protocol.PerspectiveServer, ver)
 		Expect(err).ToNot(HaveOccurred())
 		hdr.Raw = buf.Bytes()
+	})
+
+	Context("generating a mint.Config", func() {
+		It("sets non-blocking mode", func() {
+			mintConf, err := tlsToMintConfig(nil, protocol.PerspectiveClient)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mintConf.NonBlocking).To(BeTrue())
+		})
+
+		It("sets the server name", func() {
+			conf := &tls.Config{
+				ServerName:         "www.example.com",
+				InsecureSkipVerify: true,
+			}
+			mintConf, err := tlsToMintConfig(conf, protocol.PerspectiveClient)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mintConf.ServerName).To(Equal("www.example.com"))
+		})
+
+		It("sets the certificate chain", func() {
+			tlsConf := testdata.GetTLSConfig()
+			tlsConf.InsecureSkipVerify = true
+			mintConf, err := tlsToMintConfig(tlsConf, protocol.PerspectiveClient)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mintConf.Certificates).ToNot(BeEmpty())
+			Expect(mintConf.Certificates).To(HaveLen(len(tlsConf.Certificates)))
+		})
+
+		It("forces the application to set InsecureSkipVerify, because mint is INSECURE", func() {
+			conf := &tls.Config{
+				ServerName:         "www.example.com",
+				InsecureSkipVerify: false,
+			}
+			_, err := tlsToMintConfig(conf, protocol.PerspectiveClient)
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(errMintIsInsecure))
+		})
+
+		It("requires client authentication", func() {
+			conf := &tls.Config{ServerName: "localhost"} // mint forces us to set a ServerName for a server config, although this field is only used for clients
+			mintConf, err := tlsToMintConfig(conf, protocol.PerspectiveServer)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mintConf.RequireClientAuth).To(BeFalse())
+			conf = &tls.Config{
+				ServerName: "localhost", // mint forces us to set a ServerName for a server config, although this field is only used for clients
+				ClientAuth: tls.RequireAnyClientCert,
+			}
+			mintConf, err = tlsToMintConfig(conf, protocol.PerspectiveServer)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mintConf.RequireClientAuth).To(BeTrue())
+		})
+
+		It("rejects unsupported client auth types", func() {
+			conf := &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert}
+			_, err := tlsToMintConfig(conf, protocol.PerspectiveServer)
+			Expect(err).To(MatchError("mint currently only support ClientAuthType RequireAnyClientCert"))
+		})
 	})
 
 	Context("unpacking", func() {

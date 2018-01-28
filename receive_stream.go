@@ -12,6 +12,15 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/wire"
 )
 
+type receiveStreamI interface {
+	ReceiveStream
+
+	handleStreamFrame(*wire.StreamFrame) error
+	handleRstStreamFrame(*wire.RstStreamFrame) error
+	closeForShutdown(error)
+	getWindowUpdate() protocol.ByteCount
+}
+
 type receiveStream struct {
 	mutex sync.Mutex
 
@@ -40,6 +49,7 @@ type receiveStream struct {
 }
 
 var _ ReceiveStream = &receiveStream{}
+var _ receiveStreamI = &receiveStream{}
 
 func newReceiveStream(
 	streamID protocol.StreamID,
@@ -148,6 +158,7 @@ func (s *receiveStream) Read(p []byte) (int, error) {
 			s.frameQueue.Pop()
 			s.finRead = frame.FinBit
 			if frame.FinBit {
+				s.sender.onStreamCompleted(s.streamID)
 				return bytesRead, io.EOF
 			}
 		}
@@ -219,6 +230,7 @@ func (s *receiveStream) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
 		error:     fmt.Errorf("Stream %d was reset with error code %d", s.streamID, frame.ErrorCode),
 	}
 	s.signalRead()
+	s.sender.onStreamCompleted(s.streamID)
 	return nil
 }
 
@@ -257,14 +269,6 @@ func (s *receiveStream) closeForShutdown(err error) {
 	s.closeForShutdownErr = err
 	s.mutex.Unlock()
 	s.signalRead()
-}
-
-func (s *receiveStream) finished() bool {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	return s.closedForShutdown || // if the stream was abruptly closed for shutting down
-		s.finRead || s.resetRemotely
 }
 
 func (s *receiveStream) getWindowUpdate() protocol.ByteCount {

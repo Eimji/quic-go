@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -63,35 +64,36 @@ func mockQuicCryptoKeyDerivation(forwardSecure bool, sharedSecret, nonces []byte
 }
 
 type mockStream struct {
-	unblockRead chan struct{} // close this chan to unblock Read
+	unblockRead chan struct{}
 	dataToRead  bytes.Buffer
 	dataWritten bytes.Buffer
 }
+
+var _ io.ReadWriter = &mockStream{}
+
+var errMockStreamClosing = errors.New("mock stream closing")
 
 func newMockStream() *mockStream {
 	return &mockStream{unblockRead: make(chan struct{})}
 }
 
+// call Close to make Read return
 func (s *mockStream) Read(p []byte) (int, error) {
 	n, _ := s.dataToRead.Read(p)
 	if n == 0 { // block if there's no data
 		<-s.unblockRead
+		return 0, errMockStreamClosing
 	}
 	return n, nil // never return an EOF
-}
-
-func (s *mockStream) ReadByte() (byte, error) {
-	return s.dataToRead.ReadByte()
 }
 
 func (s *mockStream) Write(p []byte) (int, error) {
 	return s.dataWritten.Write(p)
 }
 
-func (s *mockStream) Close() error                       { panic("not implemented") }
-func (s *mockStream) Reset(error)                        { panic("not implemented") }
-func (mockStream) CloseRemote(offset protocol.ByteCount) { panic("not implemented") }
-func (s mockStream) StreamID() protocol.StreamID         { panic("not implemented") }
+func (s *mockStream) close() {
+	close(s.unblockRead)
+}
 
 type mockCookieProtector struct {
 	data      []byte
@@ -122,7 +124,7 @@ var _ = Describe("Server Crypto Setup", func() {
 		cs                *cryptoSetupServer
 		stream            *mockStream
 		paramsChan        chan TransportParameters
-		aeadChanged       chan protocol.EncryptionLevel
+		handshakeEvent    chan struct{}
 		nonce32           []byte
 		versionTag        []byte
 		validSTK          []byte
@@ -144,7 +146,7 @@ var _ = Describe("Server Crypto Setup", func() {
 
 		// use a buffered channel here, so that we can parse a CHLO without having to receive the TransportParameters to avoid blocking
 		paramsChan = make(chan TransportParameters, 1)
-		aeadChanged = make(chan protocol.EncryptionLevel, 2)
+		handshakeEvent = make(chan struct{}, 2)
 		stream = newMockStream()
 		kex = &mockKEX{}
 		signer = &mockSigner{}
@@ -168,7 +170,7 @@ var _ = Describe("Server Crypto Setup", func() {
 			supportedVersions,
 			nil,
 			paramsChan,
-			aeadChanged,
+			handshakeEvent,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		cs = csInt.(*cryptoSetupServer)
@@ -181,10 +183,6 @@ var _ = Describe("Server Crypto Setup", func() {
 		cs.keyExchange = func() crypto.KeyExchange { return &mockKEX{ephermal: true} }
 		cs.nullAEAD = mockcrypto.NewMockAEAD(mockCtrl)
 		cs.cryptoStream = stream
-	})
-
-	AfterEach(func() {
-		close(stream.unblockRead)
 	})
 
 	Context("diversification nonce", func() {
@@ -345,10 +343,10 @@ var _ = Describe("Server Crypto Setup", func() {
 			err := cs.HandleCryptoStream()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stream.dataWritten.Bytes()).To(HavePrefix("REJ"))
-			Expect(aeadChanged).To(Receive(Equal(protocol.EncryptionSecure)))
+			Expect(handshakeEvent).To(Receive()) // for the switch to secure
 			Expect(stream.dataWritten.Bytes()).To(ContainSubstring("SHLO"))
-			Expect(aeadChanged).To(Receive(Equal(protocol.EncryptionForwardSecure)))
-			Expect(aeadChanged).ToNot(BeClosed())
+			Expect(handshakeEvent).To(Receive()) // for the switch to forward secure
+			Expect(handshakeEvent).ToNot(BeClosed())
 		})
 
 		It("rejects client nonces that have the wrong length", func() {
@@ -379,9 +377,9 @@ var _ = Describe("Server Crypto Setup", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stream.dataWritten.Bytes()).To(HavePrefix("SHLO"))
 			Expect(stream.dataWritten.Bytes()).ToNot(ContainSubstring("REJ"))
-			Expect(aeadChanged).To(Receive(Equal(protocol.EncryptionSecure)))
-			Expect(aeadChanged).To(Receive(Equal(protocol.EncryptionForwardSecure)))
-			Expect(aeadChanged).ToNot(BeClosed())
+			Expect(handshakeEvent).To(Receive()) // for the switch to secure
+			Expect(handshakeEvent).To(Receive()) // for the switch to forward secure
+			Expect(handshakeEvent).ToNot(BeClosed())
 		})
 
 		It("recognizes inchoate CHLOs missing SCID", func() {
@@ -537,7 +535,7 @@ var _ = Describe("Server Crypto Setup", func() {
 				TagKEXS: kexs,
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(aeadChanged).To(Receive(Equal(protocol.EncryptionSecure)))
+			Expect(handshakeEvent).To(Receive()) // for the switch to secure
 			close(cs.sentSHLO)
 		}
 
@@ -659,7 +657,26 @@ var _ = Describe("Server Crypto Setup", func() {
 				cs.forwardSecureAEAD.(*mockcrypto.MockAEAD).EXPECT().Open(nil, []byte("forward secure encrypted"), protocol.PacketNumber(200), []byte{})
 				_, _, err := cs.Open(nil, []byte("forward secure encrypted"), 200, []byte{})
 				Expect(err).ToNot(HaveOccurred())
-				Expect(aeadChanged).To(BeClosed())
+				Expect(handshakeEvent).To(BeClosed())
+			})
+		})
+
+		Context("reporting the connection state", func() {
+			It("reports before the handshake completes", func() {
+				cs.sni = "server name"
+				state := cs.ConnectionState()
+				Expect(state.HandshakeComplete).To(BeFalse())
+				Expect(state.ServerName).To(Equal("server name"))
+			})
+
+			It("reports after the handshake completes", func() {
+				doCHLO()
+				// receive a forward secure packet
+				cs.forwardSecureAEAD.(*mockcrypto.MockAEAD).EXPECT().Open(nil, []byte("forward secure encrypted"), protocol.PacketNumber(11), []byte{})
+				_, _, err := cs.Open(nil, []byte("forward secure encrypted"), 11, []byte{})
+				Expect(err).ToNot(HaveOccurred())
+				state := cs.ConnectionState()
+				Expect(state.HandshakeComplete).To(BeTrue())
 			})
 		})
 
@@ -723,6 +740,7 @@ var _ = Describe("Server Crypto Setup", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(done).To(BeFalse())
 			Expect(stream.dataWritten.Bytes()).To(ContainSubstring(string(validSTK)))
+			Expect(cs.sni).To(Equal("foo"))
 		})
 
 		It("works with proper STK", func() {

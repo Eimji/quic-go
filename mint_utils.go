@@ -16,6 +16,8 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/wire"
 )
 
+var errMintIsInsecure = errors.New("mint currently DOES NOT support certificate verification (see https://github.com/bifurcation/mint/issues/161 for details). Set InsecureSkipVerify to acknowledge that no certificate verification will be performed, and the connection will be vulnerable to man-in-the-middle attacks")
+
 type mintController struct {
 	csc  *handshake.CryptoStreamConn
 	conn *mint.Conn
@@ -56,6 +58,10 @@ func (mc *mintController) State() mint.State {
 	return mc.conn.State().HandshakeState
 }
 
+func (mc *mintController) ConnectionState() mint.ConnectionState {
+	return mc.conn.State()
+}
+
 func (mc *mintController) SetCryptoStream(stream io.ReadWriter) {
 	mc.csc.SetStream(stream)
 }
@@ -73,6 +79,10 @@ func tlsToMintConfig(tlsConf *tls.Config, pers protocol.Perspective) (*mint.Conf
 		},
 	}
 	if tlsConf != nil {
+		if pers == protocol.PerspectiveClient && !tlsConf.InsecureSkipVerify {
+			return nil, errMintIsInsecure
+		}
+		mconf.ServerName = tlsConf.ServerName
 		mconf.Certificates = make([]*mint.Certificate, len(tlsConf.Certificates))
 		for i, certChain := range tlsConf.Certificates {
 			mconf.Certificates[i] = &mint.Certificate{
@@ -86,6 +96,13 @@ func tlsToMintConfig(tlsConf *tls.Config, pers protocol.Perspective) (*mint.Conf
 				}
 				mconf.Certificates[i].Chain[j] = c
 			}
+		}
+		switch tlsConf.ClientAuth {
+		case tls.NoClientCert:
+		case tls.RequireAnyClientCert:
+			mconf.RequireClientAuth = true
+		default:
+			return nil, errors.New("mint currently only support ClientAuthType RequireAnyClientCert")
 		}
 	}
 	if err := mconf.Init(pers == protocol.PerspectiveClient); err != nil {
@@ -128,14 +145,14 @@ func unpackInitialPacket(aead crypto.AEAD, hdr *wire.Header, data []byte, versio
 
 // packUnencryptedPacket provides a low-overhead way to pack a packet.
 // It is supposed to be used in the early stages of the handshake, before a session (which owns a packetPacker) is available.
-func packUnencryptedPacket(aead crypto.AEAD, hdr *wire.Header, sf *wire.StreamFrame, pers protocol.Perspective) ([]byte, error) {
+func packUnencryptedPacket(aead crypto.AEAD, hdr *wire.Header, f wire.Frame, pers protocol.Perspective) ([]byte, error) {
 	raw := getPacketBuffer()
 	buffer := bytes.NewBuffer(raw)
 	if err := hdr.Write(buffer, pers, hdr.Version); err != nil {
 		return nil, err
 	}
 	payloadStartIndex := buffer.Len()
-	if err := sf.Write(buffer, hdr.Version); err != nil {
+	if err := f.Write(buffer, hdr.Version); err != nil {
 		return nil, err
 	}
 	raw = raw[0:buffer.Len()]
@@ -144,7 +161,7 @@ func packUnencryptedPacket(aead crypto.AEAD, hdr *wire.Header, sf *wire.StreamFr
 	if utils.Debug() {
 		utils.Debugf("-> Sending packet 0x%x (%d bytes) for connection %x, %s", hdr.PacketNumber, len(raw), hdr.ConnectionID, protocol.EncryptionUnencrypted)
 		hdr.Log()
-		wire.LogFrame(sf, true)
+		wire.LogFrame(f, true)
 	}
 	return raw, nil
 }

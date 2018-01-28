@@ -2,6 +2,7 @@ package quic
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
@@ -16,24 +17,52 @@ const (
 
 // The streamSender is notified by the stream about various events.
 type streamSender interface {
-	scheduleSending()
 	queueControlFrame(wire.Frame)
 	onHasWindowUpdate(protocol.StreamID)
+	onHasStreamData(protocol.StreamID)
+	onStreamCompleted(protocol.StreamID)
 }
+
+// Each of the both stream halves gets its own uniStreamSender.
+// This is necessary in order to keep track when both halves have been completed.
+type uniStreamSender struct {
+	streamSender
+	onStreamCompletedImpl func()
+}
+
+func (s *uniStreamSender) queueControlFrame(f wire.Frame) {
+	s.streamSender.queueControlFrame(f)
+}
+
+func (s *uniStreamSender) onHasWindowUpdate(id protocol.StreamID) {
+	s.streamSender.onHasWindowUpdate(id)
+}
+
+func (s *uniStreamSender) onHasStreamData(id protocol.StreamID) {
+	s.streamSender.onHasStreamData(id)
+}
+
+func (s *uniStreamSender) onStreamCompleted(protocol.StreamID) {
+	s.onStreamCompletedImpl()
+}
+
+var _ streamSender = &uniStreamSender{}
 
 type streamI interface {
 	Stream
-
+	closeForShutdown(error)
+	// for receiving
 	handleStreamFrame(*wire.StreamFrame) error
 	handleRstStreamFrame(*wire.RstStreamFrame) error
-	handleStopSendingFrame(*wire.StopSendingFrame)
-	popStreamFrame(maxBytes protocol.ByteCount) *wire.StreamFrame
-	finished() bool
-	closeForShutdown(error)
-	// methods needed for flow control
 	getWindowUpdate() protocol.ByteCount
+	// for sending
+	handleStopSendingFrame(*wire.StopSendingFrame)
+	popStreamFrame(maxBytes protocol.ByteCount) (*wire.StreamFrame, bool)
 	handleMaxStreamDataFrame(*wire.MaxStreamDataFrame)
 }
+
+var _ receiveStreamI = (streamI)(nil)
+var _ sendStreamI = (streamI)(nil)
 
 // A Stream assembles the data from StreamFrames and provides a super-convenient Read-Interface
 //
@@ -42,11 +71,15 @@ type stream struct {
 	receiveStream
 	sendStream
 
+	completedMutex         sync.Mutex
+	sender                 streamSender
+	receiveStreamCompleted bool
+	sendStreamCompleted    bool
+
 	version protocol.VersionNumber
 }
 
 var _ Stream = &stream{}
-var _ streamI = &stream{}
 
 type deadlineError struct{}
 
@@ -72,10 +105,28 @@ func newStream(streamID protocol.StreamID,
 	flowController flowcontrol.StreamFlowController,
 	version protocol.VersionNumber,
 ) *stream {
-	return &stream{
-		sendStream:    *newSendStream(streamID, sender, flowController, version),
-		receiveStream: *newReceiveStream(streamID, sender, flowController),
+	s := &stream{sender: sender}
+	senderForSendStream := &uniStreamSender{
+		streamSender: sender,
+		onStreamCompletedImpl: func() {
+			s.completedMutex.Lock()
+			s.sendStreamCompleted = true
+			s.checkIfCompleted()
+			s.completedMutex.Unlock()
+		},
 	}
+	s.sendStream = *newSendStream(streamID, senderForSendStream, flowController, version)
+	senderForReceiveStream := &uniStreamSender{
+		streamSender: sender,
+		onStreamCompletedImpl: func() {
+			s.completedMutex.Lock()
+			s.receiveStreamCompleted = true
+			s.checkIfCompleted()
+			s.completedMutex.Unlock()
+		},
+	}
+	s.receiveStream = *newReceiveStream(streamID, senderForReceiveStream, flowController)
+	return s
 }
 
 // need to define StreamID() here, since both receiveStream and readStream have a StreamID()
@@ -120,6 +171,10 @@ func (s *stream) handleRstStreamFrame(frame *wire.RstStreamFrame) error {
 	return nil
 }
 
-func (s *stream) finished() bool {
-	return s.sendStream.finished() && s.receiveStream.finished()
+// checkIfCompleted is called from the uniStreamSender, when one of the stream halves is completed.
+// It makes sure that the onStreamCompleted callback is only called if both receive and send side have completed.
+func (s *stream) checkIfCompleted() {
+	if s.sendStreamCompleted && s.receiveStreamCompleted {
+		s.sender.onStreamCompleted(s.StreamID())
+	}
 }

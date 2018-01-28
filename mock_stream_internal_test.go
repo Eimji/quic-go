@@ -169,18 +169,6 @@ func (mr *MockStreamIMockRecorder) closeForShutdown(arg0 interface{}) *gomock.Ca
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "closeForShutdown", reflect.TypeOf((*MockStreamI)(nil).closeForShutdown), arg0)
 }
 
-// finished mocks base method
-func (m *MockStreamI) finished() bool {
-	ret := m.ctrl.Call(m, "finished")
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// finished indicates an expected call of finished
-func (mr *MockStreamIMockRecorder) finished() *gomock.Call {
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "finished", reflect.TypeOf((*MockStreamI)(nil).finished))
-}
-
 // getWindowUpdate mocks base method
 func (m *MockStreamI) getWindowUpdate() protocol.ByteCount {
 	ret := m.ctrl.Call(m, "getWindowUpdate")
@@ -238,10 +226,11 @@ func (mr *MockStreamIMockRecorder) handleStreamFrame(arg0 interface{}) *gomock.C
 }
 
 // popStreamFrame mocks base method
-func (m *MockStreamI) popStreamFrame(arg0 protocol.ByteCount) *wire.StreamFrame {
+func (m *MockStreamI) popStreamFrame(arg0 protocol.ByteCount) (*wire.StreamFrame, bool) {
 	ret := m.ctrl.Call(m, "popStreamFrame", arg0)
 	ret0, _ := ret[0].(*wire.StreamFrame)
-	return ret0
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
 }
 
 // popStreamFrame indicates an expected call of popStreamFrame

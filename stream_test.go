@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"errors"
 	"io"
 	"os"
 	"strconv"
@@ -58,10 +57,6 @@ var _ = Describe("Stream", func() {
 
 	// need some stream cancelation tests here, since gQUIC doesn't cleanly separate the two stream halves
 	Context("stream cancelations", func() {
-		BeforeEach(func() {
-			mockSender.EXPECT().scheduleSending().AnyTimes()
-		})
-
 		Context("for gQUIC", func() {
 			BeforeEach(func() {
 				str.version = versionGQUICFrames
@@ -70,11 +65,13 @@ var _ = Describe("Stream", func() {
 			})
 
 			It("unblocks Write when receiving a RST_STREAM frame with non-zero error code", func() {
+				mockSender.EXPECT().onHasStreamData(streamID)
 				mockSender.EXPECT().queueControlFrame(&wire.RstStreamFrame{
 					StreamID:   streamID,
 					ByteOffset: 1000,
 					ErrorCode:  errorCodeStoppingGQUIC,
 				})
+				mockSender.EXPECT().onStreamCompleted(streamID)
 				mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(6), true)
 				str.writeOffset = 1000
 				f := &wire.RstStreamFrame{
@@ -99,6 +96,7 @@ var _ = Describe("Stream", func() {
 			})
 
 			It("unblocks Write when receiving a RST_STREAM frame with error code 0", func() {
+				mockSender.EXPECT().onHasStreamData(streamID)
 				mockSender.EXPECT().queueControlFrame(&wire.RstStreamFrame{
 					StreamID:   streamID,
 					ByteOffset: 1000,
@@ -129,9 +127,10 @@ var _ = Describe("Stream", func() {
 
 			It("sends a RST_STREAM with error code 0, after the stream is closed", func() {
 				str.version = versionGQUICFrames
+				mockSender.EXPECT().onHasStreamData(streamID).Times(2) // once for the Write, once for the Close
 				mockFC.EXPECT().SendWindowSize().Return(protocol.MaxByteCount).AnyTimes()
 				mockFC.EXPECT().AddBytesSent(protocol.ByteCount(6))
-				mockFC.EXPECT().IsNewlyBlocked()
+				mockFC.EXPECT().IsBlocked()
 				err := str.CancelRead(1234)
 				Expect(err).ToNot(HaveOccurred())
 				writeReturned := make(chan struct{})
@@ -141,15 +140,17 @@ var _ = Describe("Stream", func() {
 					Expect(err).ToNot(HaveOccurred())
 					close(writeReturned)
 				}()
-				Eventually(func() *wire.StreamFrame { return str.popStreamFrame(1000) }).ShouldNot(BeNil())
+				Eventually(func() *wire.StreamFrame {
+					frame, _ := str.popStreamFrame(1000)
+					return frame
+				}).ShouldNot(BeNil())
 				Eventually(writeReturned).Should(BeClosed())
 				mockSender.EXPECT().queueControlFrame(&wire.RstStreamFrame{
 					StreamID:   streamID,
 					ByteOffset: 6,
 					ErrorCode:  0,
 				})
-				err = str.Close()
-				Expect(err).ToNot(HaveOccurred())
+				Expect(str.Close()).To(Succeed())
 			})
 		})
 
@@ -159,6 +160,7 @@ var _ = Describe("Stream", func() {
 					StreamID:  streamID,
 					ErrorCode: 1234,
 				})
+				mockSender.EXPECT().onHasStreamData(streamID)
 				err := str.CancelRead(1234)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(str.Close()).To(Succeed())
@@ -187,26 +189,21 @@ var _ = Describe("Stream", func() {
 		})
 	})
 
-	Context("saying if it is finished", func() {
-		It("is finished when both the send and the receive side are finished", func() {
-			str.receiveStream.closeForShutdown(errors.New("shutdown"))
-			Expect(str.receiveStream.finished()).To(BeTrue())
-			Expect(str.sendStream.finished()).To(BeFalse())
-			Expect(str.finished()).To(BeFalse())
+	Context("completing", func() {
+		It("is not completed when only the receive side is completed", func() {
+			// don't EXPECT a call to mockSender.onStreamCompleted()
+			str.receiveStream.sender.onStreamCompleted(streamID)
 		})
 
-		It("is not finished when the receive side is finished", func() {
-			str.sendStream.closeForShutdown(errors.New("shutdown"))
-			Expect(str.receiveStream.finished()).To(BeFalse())
-			Expect(str.sendStream.finished()).To(BeTrue())
-			Expect(str.finished()).To(BeFalse())
+		It("is not completed when only the send side is completed", func() {
+			// don't EXPECT a call to mockSender.onStreamCompleted()
+			str.sendStream.sender.onStreamCompleted(streamID)
 		})
 
-		It("is not finished when the send side is finished", func() {
-			str.closeForShutdown(errors.New("shutdown"))
-			Expect(str.receiveStream.finished()).To(BeTrue())
-			Expect(str.sendStream.finished()).To(BeTrue())
-			Expect(str.finished()).To(BeTrue())
+		It("is completed when both sides are completed", func() {
+			mockSender.EXPECT().onStreamCompleted(streamID)
+			str.sendStream.sender.onStreamCompleted(streamID)
+			str.receiveStream.sender.onStreamCompleted(streamID)
 		})
 	})
 })

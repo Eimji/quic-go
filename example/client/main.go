@@ -63,11 +63,13 @@ func main() {
 		versions = append([]protocol.VersionNumber{protocol.VersionTLS}, versions...)
 	}
 
+	roundTripper := &h2quic.RoundTripper{
+		QuicConfig:      &quic.Config{Versions: versions},
+		TLSClientConfig: tlsConfig,
+	}
+	defer roundTripper.Close()
 	hclient := &http.Client{
-		Transport: &h2quic.RoundTripper{
-			QuicConfig:      &quic.Config{Versions: versions},
-			TLSClientConfig: tlsConfig,
-		},
+		Transport: roundTripper,
 	}
 
 	var wg sync.WaitGroup

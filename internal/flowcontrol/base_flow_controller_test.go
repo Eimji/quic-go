@@ -1,6 +1,8 @@
 package flowcontrol
 
 import (
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/lucas-clemente/quic-go/congestion"
@@ -8,6 +10,16 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
+
+// on the CIs, the timing is a lot less precise, so scale every duration by this factor
+func scaleDuration(t time.Duration) time.Duration {
+	scaleFactor := 1
+	if f, err := strconv.Atoi(os.Getenv("TIMESCALE_FACTOR")); err == nil { // parsing "" errors, so this works fine if the env is not set
+		scaleFactor = f
+	}
+	Expect(scaleFactor).ToNot(BeZero())
+	return time.Duration(scaleFactor) * t
+}
 
 var _ = Describe("Base Flow controller", func() {
 	var controller *baseFlowController
@@ -48,29 +60,6 @@ var _ = Describe("Base Flow controller", func() {
 			Expect(controller.sendWindowSize()).To(Equal(protocol.ByteCount(20)))
 			controller.UpdateSendWindow(10)
 			Expect(controller.sendWindowSize()).To(Equal(protocol.ByteCount(20)))
-		})
-
-		It("says when it's blocked", func() {
-			controller.UpdateSendWindow(100)
-			Expect(controller.IsNewlyBlocked()).To(BeFalse())
-			controller.AddBytesSent(100)
-			blocked, offset := controller.IsNewlyBlocked()
-			Expect(blocked).To(BeTrue())
-			Expect(offset).To(Equal(protocol.ByteCount(100)))
-		})
-
-		It("doesn't say that it's newly blocked multiple times for the same offset", func() {
-			controller.UpdateSendWindow(100)
-			controller.AddBytesSent(100)
-			newlyBlocked, offset := controller.IsNewlyBlocked()
-			Expect(newlyBlocked).To(BeTrue())
-			Expect(offset).To(Equal(protocol.ByteCount(100)))
-			newlyBlocked, _ = controller.IsNewlyBlocked()
-			Expect(newlyBlocked).To(BeFalse())
-			controller.UpdateSendWindow(150)
-			controller.AddBytesSent(150)
-			newlyBlocked, offset = controller.IsNewlyBlocked()
-			Expect(newlyBlocked).To(BeTrue())
 		})
 	})
 
@@ -141,7 +130,7 @@ var _ = Describe("Base Flow controller", func() {
 
 			It("increases the window size if read so fast that the window would be consumed in less than 4 RTTs", func() {
 				bytesRead := controller.bytesRead
-				rtt := 200 * time.Millisecond
+				rtt := scaleDuration(20 * time.Millisecond)
 				setRtt(rtt)
 				// consume more than 2/3 of the window...
 				dataRead := receiveWindowSize*2/3 + 1
@@ -162,7 +151,7 @@ var _ = Describe("Base Flow controller", func() {
 				// this test only makes sense if a window update is triggered before half of the window has been consumed
 				Expect(protocol.WindowUpdateThreshold).To(BeNumerically(">", 1/3))
 				bytesRead := controller.bytesRead
-				rtt := 200 * time.Millisecond
+				rtt := scaleDuration(20 * time.Millisecond)
 				setRtt(rtt)
 				// consume more than 2/3 of the window...
 				dataRead := receiveWindowSize*1/3 + 1
@@ -181,7 +170,7 @@ var _ = Describe("Base Flow controller", func() {
 
 			It("doesn't increase the window size if read too slowly", func() {
 				bytesRead := controller.bytesRead
-				rtt := 200 * time.Millisecond
+				rtt := scaleDuration(20 * time.Millisecond)
 				setRtt(rtt)
 				// consume less than 2/3 of the window...
 				dataRead := receiveWindowSize*2/3 - 1
@@ -204,7 +193,7 @@ var _ = Describe("Base Flow controller", func() {
 					controller.epochStartOffset = controller.bytesRead
 					controller.AddBytesRead(controller.receiveWindowSize/2 + 1)
 				}
-				setRtt(200 * time.Millisecond)
+				setRtt(scaleDuration(20 * time.Millisecond))
 				resetEpoch()
 				controller.maybeAdjustWindowSize()
 				Expect(controller.receiveWindowSize).To(Equal(2 * oldWindowSize)) // 2000
