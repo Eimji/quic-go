@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/congestion"
+	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
@@ -37,8 +37,6 @@ type sentPacketHandler struct {
 	lastSentPacketNumber protocol.PacketNumber
 	nextPacketSendTime   time.Time
 	skippedPackets       []protocol.PacketNumber
-
-	numNonRetransmittablePackets int // number of non-retransmittable packets since the last retransmittable packet
 
 	largestAcked                 protocol.PacketNumber
 	largestReceivedPacketWithAck protocol.PacketNumber
@@ -96,10 +94,6 @@ func (h *sentPacketHandler) lowestUnacked() protocol.PacketNumber {
 	return h.largestAcked + 1
 }
 
-func (h *sentPacketHandler) ShouldSendRetransmittablePacket() bool {
-	return h.numNonRetransmittablePackets >= protocol.MaxNonRetransmittablePackets
-}
-
 func (h *sentPacketHandler) SetHandshakeComplete() {
 	var queue []*Packet
 	for _, packet := range h.retransmissionQueue {
@@ -142,9 +136,6 @@ func (h *sentPacketHandler) SentPacket(packet *Packet) error {
 		packet.largestAcked = largestAcked
 		h.bytesInFlight += packet.Length
 		h.packetHistory.PushBack(*packet)
-		h.numNonRetransmittablePackets = 0
-	} else {
-		h.numNonRetransmittablePackets++
 	}
 
 	h.congestion.OnPacketSent(

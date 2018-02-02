@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/ackhandler"
-	"github.com/lucas-clemente/quic-go/congestion"
+	"github.com/lucas-clemente/quic-go/internal/ackhandler"
+	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/crypto"
 	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
@@ -848,10 +848,6 @@ func (s *session) sendPacket() (bool, error) {
 		if swf := s.sentPacketHandler.GetStopWaitingFrame(hasRetransmission); swf != nil {
 			s.packer.QueueControlFrame(swf)
 		}
-	}
-	// add a retransmittable frame
-	if s.sentPacketHandler.ShouldSendRetransmittablePacket() {
-		s.packer.MakeNextPacketRetransmittable()
 	}
 	packet, err := s.packer.PackPacket()
 	if err != nil || packet == nil {

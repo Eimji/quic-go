@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/lucas-clemente/quic-go/congestion"
+	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/mocks"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
@@ -183,30 +183,6 @@ var _ = Describe("SentPacketHandler", func() {
 					Expect(handler.skippedPackets).To(BeEmpty())
 				})
 			})
-		})
-	})
-
-	Context("forcing retransmittable packets", func() {
-		It("says that every 20th packet should be retransmittable", func() {
-			// send 19 non-retransmittable packets
-			for i := 1; i <= protocol.MaxNonRetransmittablePackets; i++ {
-				Expect(handler.ShouldSendRetransmittablePacket()).To(BeFalse())
-				err := handler.SentPacket(nonRetransmittablePacket(protocol.PacketNumber(i)))
-				Expect(err).ToNot(HaveOccurred())
-			}
-			Expect(handler.ShouldSendRetransmittablePacket()).To(BeTrue())
-		})
-
-		It("resets the counter when a retransmittable packet is sent", func() {
-			// send 19 non-retransmittable packets
-			for i := 1; i <= protocol.MaxNonRetransmittablePackets; i++ {
-				Expect(handler.ShouldSendRetransmittablePacket()).To(BeFalse())
-				err := handler.SentPacket(nonRetransmittablePacket(protocol.PacketNumber(i)))
-				Expect(err).ToNot(HaveOccurred())
-			}
-			err := handler.SentPacket(retransmittablePacket(20))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(handler.ShouldSendRetransmittablePacket()).To(BeFalse())
 		})
 	})
 
@@ -523,8 +499,10 @@ var _ = Describe("SentPacketHandler", func() {
 				Expect(handler.rttStats.LatestRTT()).To(BeNumerically("~", 1*time.Minute, 1*time.Second))
 			})
 
-			It("uses the DelayTime in the ack frame", func() {
+			It("uses the DelayTime in the ACK frame", func() {
 				now := time.Now()
+				// make sure the rttStats have a min RTT, so that the delay is used
+				handler.rttStats.UpdateRTT(5*time.Minute, 0, time.Now())
 				getPacketElement(1).Value.sendTime = now.Add(-10 * time.Minute)
 				err := handler.ReceivedAck(&wire.AckFrame{LargestAcked: 1, DelayTime: 5 * time.Minute}, 1, protocol.EncryptionUnencrypted, time.Now())
 				Expect(err).NotTo(HaveOccurred())
