@@ -402,7 +402,3 @@ func (p *packetPacker) SetOmitConnectionID() {
 func (p *packetPacker) SetSpinBit(value bool) {
 	p.spinBit = value
 }
-
-func (p *packetPacker) MakeNextPacketRetransmittable() {
-	p.makeNextPacketRetransmittable = true
-}
