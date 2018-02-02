@@ -41,7 +41,7 @@ type packetPacker struct {
 	ackFrame                  *wire.AckFrame
 	leastUnacked              protocol.PacketNumber
 	omitConnectionID          bool
-	spinBit                       bool
+	spinBit                   bool
 	hasSentPacket             bool // has the packetPacker already sent a packet
 	numNonRetransmittableAcks int
 }
@@ -398,7 +398,6 @@ func (p *packetPacker) SetLeastUnacked(leastUnacked protocol.PacketNumber) {
 func (p *packetPacker) SetOmitConnectionID() {
 	p.omitConnectionID = true
 }
-<<<<<<< HEAD
 
 func (p *packetPacker) SetSpinBit(value bool) {
 	p.spinBit = value
@@ -407,5 +406,3 @@ func (p *packetPacker) SetSpinBit(value bool) {
 func (p *packetPacker) MakeNextPacketRetransmittable() {
 	p.makeNextPacketRetransmittable = true
 }
-=======
->>>>>>> d0a394430f7fcda42ee29a840a4910e740ef8344
