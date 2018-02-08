@@ -357,6 +357,23 @@ var _ = Describe("Session", func() {
 			})
 		})
 
+		Context("handling MAX_STREAM_ID frames", func() {
+			It("passes the frame to the streamsMap", func() {
+				f := &wire.MaxStreamIDFrame{StreamID: 10}
+				streamManager.EXPECT().HandleMaxStreamIDFrame(f)
+				err := sess.handleMaxStreamIDFrame(f)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("returns errors", func() {
+				f := &wire.MaxStreamIDFrame{StreamID: 10}
+				testErr := errors.New("test error")
+				streamManager.EXPECT().HandleMaxStreamIDFrame(f).Return(testErr)
+				err := sess.handleMaxStreamIDFrame(f)
+				Expect(err).To(MatchError(testErr))
+			})
+		})
+
 		Context("handling STOP_SENDING frames", func() {
 			It("passes the frame to the stream", func() {
 				f := &wire.StopSendingFrame{
@@ -395,6 +412,16 @@ var _ = Describe("Session", func() {
 
 		It("handles BLOCKED frames", func() {
 			err := sess.handleFrames([]wire.Frame{&wire.BlockedFrame{}}, protocol.EncryptionUnspecified)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("handles STREAM_BLOCKED frames", func() {
+			err := sess.handleFrames([]wire.Frame{&wire.StreamBlockedFrame{}}, protocol.EncryptionUnspecified)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("handles STREAM_ID_BLOCKED frames", func() {
+			err := sess.handleFrames([]wire.Frame{&wire.StreamIDBlockedFrame{}}, protocol.EncryptionUnspecified)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -1447,7 +1474,7 @@ var _ = Describe("Session", func() {
 	Context("getting streams", func() {
 		It("returns a new stream", func() {
 			mstr := NewMockStreamI(mockCtrl)
-			streamManager.EXPECT().GetOrOpenStream(protocol.StreamID(11)).Return(mstr, nil)
+			streamManager.EXPECT().GetOrOpenSendStream(protocol.StreamID(11)).Return(mstr, nil)
 			str, err := sess.GetOrOpenStream(11)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(str).To(Equal(mstr))
@@ -1455,12 +1482,18 @@ var _ = Describe("Session", func() {
 
 		It("returns a nil-value (not an interface with value nil) for closed streams", func() {
 			strI := Stream(nil)
-			streamManager.EXPECT().GetOrOpenStream(protocol.StreamID(1337)).Return(strI, nil)
+			streamManager.EXPECT().GetOrOpenSendStream(protocol.StreamID(1337)).Return(strI, nil)
 			str, err := sess.GetOrOpenStream(1337)
 			Expect(err).ToNot(HaveOccurred())
 			// make sure that the returned value is a plain nil, not an Stream with value nil
 			_, ok := str.(Stream)
 			Expect(ok).To(BeFalse())
+		})
+
+		It("errors when trying to get a unidirectional stream", func() {
+			streamManager.EXPECT().GetOrOpenSendStream(protocol.StreamID(100)).Return(&sendStream{}, nil)
+			_, err := sess.GetOrOpenStream(100)
+			Expect(err).To(MatchError("Stream 100 is not a bidirectional stream"))
 		})
 
 		// all relevant tests for this are in the streamsMap
