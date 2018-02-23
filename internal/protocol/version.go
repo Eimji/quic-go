@@ -4,10 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // VersionNumber is a version number as int
-type VersionNumber int32
+type VersionNumber uint32
 
 // gQUIC version range as defined in the wiki: https://github.com/quicwg/base-drafts/wiki/QUIC-Versions
 const (
@@ -20,7 +21,7 @@ const (
 	Version39       VersionNumber = gquicVersion0 + 3*0x100 + 0x9 + iota
 	VersionTLS      VersionNumber = 101
 	VersionWhatever VersionNumber = 0 // for when the version doesn't matter
-	VersionUnknown  VersionNumber = -1
+	VersionUnknown  VersionNumber = math.MaxUint32
 )
 
 // SupportedVersions lists the versions that the server supports
@@ -46,7 +47,7 @@ func (vn VersionNumber) String() string {
 		if vn.isGQUIC() {
 			return fmt.Sprintf("gQUIC %d", vn.toGQUICVersion())
 		}
-		return fmt.Sprintf("%d", vn)
+		return fmt.Sprintf("%#x", uint32(vn))
 	}
 }
 
