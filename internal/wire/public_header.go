@@ -152,7 +152,7 @@ func parsePublicHeader(b *bytes.Reader, packetSentBy protocol.Perspective) (*Hea
 
 	// Version (optional)
 	if !header.ResetFlag && header.VersionFlag {
-		if packetSentBy == protocol.PerspectiveServer { // parse the version negotiaton packet
+		if packetSentBy == protocol.PerspectiveServer { // parse the version negotiation packet
 			if b.Len() == 0 {
 				return nil, qerr.Error(qerr.InvalidVersionNegotiationPacket, "empty version list")
 			}
@@ -240,7 +240,7 @@ func (h *Header) logPublicHeader() {
 	}
 	ver := "(unset)"
 	if h.Version != 0 {
-		ver = fmt.Sprintf("%s", h.Version)
+		ver = h.Version.String()
 	}
 	var b2i = map[bool]int{false: 0, true: 1}
 	utils.Debugf("   Public Header{Spin bit: %d, ConnectionID: %s, PacketNumber: %#x, PacketNumberLen: %d, Version: %s, DiversificationNonce: %#v}", b2i[h.SpinBit], connID, h.PacketNumber, h.PacketNumberLen, ver, h.DiversificationNonce)

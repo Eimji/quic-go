@@ -525,7 +525,7 @@ var _ = Describe("Public Header", func() {
 				PacketNumber:     0x1337,
 				PacketNumberLen:  6,
 			}).logPublicHeader()
-			Expect(string(buf.Bytes())).To(ContainSubstring("Version: (unset)"))
+			Expect(buf.String()).To(ContainSubstring("Version: (unset)"))
 		})
 
 		It("logs diversification nonces", func() {
@@ -533,7 +533,7 @@ var _ = Describe("Public Header", func() {
 				ConnectionID:         0xdecafbad,
 				DiversificationNonce: []byte{0xba, 0xdf, 0x00, 0x0d},
 			}).logPublicHeader()
-			Expect(string(buf.Bytes())).To(ContainSubstring("DiversificationNonce: []byte{0xba, 0xdf, 0x0, 0xd}"))
+			Expect(buf.String()).To(ContainSubstring("DiversificationNonce: []byte{0xba, 0xdf, 0x0, 0xd}"))
 		})
 
 	})
