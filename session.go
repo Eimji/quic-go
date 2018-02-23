@@ -111,7 +111,9 @@ type session struct {
 	handshakeChan     chan error
 	handshakeComplete bool
 
-	lastRcvdPacketNumber protocol.PacketNumber
+	receivedFirstPacket              bool // since packet numbers start at 0, we can't use largestRcvdPacketNumber != 0 for this
+	receivedFirstForwardSecurePacket bool
+	lastRcvdPacketNumber             protocol.PacketNumber
 	// Used to calculate the next packet number from the truncated wire
 	// representation, and sent back in public reset packets
 	largestRcvdPacketNumber protocol.PacketNumber
@@ -156,7 +158,7 @@ func newSession(
 	transportParams := &handshake.TransportParameters{
 		StreamFlowControlWindow:     protocol.ReceiveStreamFlowControlWindow,
 		ConnectionFlowControlWindow: protocol.ReceiveConnectionFlowControlWindow,
-		MaxStreams:                  protocol.MaxIncomingStreams,
+		MaxStreams:                  uint32(s.config.MaxIncomingStreams),
 		IdleTimeout:                 s.config.IdleTimeout,
 	}
 	cs, err := newCryptoSetup(
@@ -204,7 +206,7 @@ var newClientSession = func(
 	transportParams := &handshake.TransportParameters{
 		StreamFlowControlWindow:     protocol.ReceiveStreamFlowControlWindow,
 		ConnectionFlowControlWindow: protocol.ReceiveConnectionFlowControlWindow,
-		MaxStreams:                  protocol.MaxIncomingStreams,
+		MaxStreams:                  uint32(s.config.MaxIncomingStreams),
 		IdleTimeout:                 s.config.IdleTimeout,
 		OmitConnectionID:            s.config.RequestConnectionIDOmission,
 	}
@@ -329,9 +331,9 @@ func (s *session) postSetup(initialPacketNumber protocol.PacketNumber) error {
 	s.receivedPacketHandler = ackhandler.NewReceivedPacketHandler(s.version)
 
 	if s.version.UsesTLS() {
-		s.streamsMap = newStreamsMap(s, s.newFlowController, s.perspective, s.version)
+		s.streamsMap = newStreamsMap(s, s.newFlowController, s.config.MaxIncomingStreams, s.config.MaxIncomingUniStreams, s.perspective, s.version)
 	} else {
-		s.streamsMap = newStreamsMapLegacy(s.newStream, s.perspective)
+		s.streamsMap = newStreamsMapLegacy(s.newStream, s.config.MaxIncomingStreams, s.perspective)
 	}
 	s.streamFramer = newStreamFramer(s.cryptoStream, s.streamsMap, s.version)
 	s.packer = newPacketPacker(s.connectionID,
@@ -393,14 +395,13 @@ runLoop:
 			}
 			// This is a bit unclean, but works properly, since the packet always
 			// begins with the public header and we never copy it.
-			putPacketBuffer(p.header.Raw)
+			putPacketBuffer(&p.header.Raw)
 		case p := <-s.paramsChan:
 			s.processTransportParameters(&p)
 		case _, ok := <-handshakeEvent:
 			if !ok { // the aeadChanged chan was closed. This means that the handshake is completed.
 				s.handshakeComplete = true
 				handshakeEvent = nil // prevent this case from ever being selected again
-				s.sentPacketHandler.SetHandshakeComplete()
 				if !s.version.UsesTLS() && s.perspective == protocol.PerspectiveClient {
 					// In gQUIC, there's no equivalent to the Finished message in TLS
 					// The server knows that the handshake is complete when it receives the first forward-secure packet sent by the client.
@@ -509,6 +510,7 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 		p.rcvTime = time.Now()
 	}
 
+	s.receivedFirstPacket = true
 	s.lastNetworkActivityTime = p.rcvTime
 	s.keepAlivePingSent = false
 	hdr := p.header
@@ -541,6 +543,15 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 	// if the decryption failed, this might be a packet sent by an attacker
 	if err != nil {
 		return err
+	}
+
+	// In TLS 1.3, the client considers the handshake complete as soon as
+	// it received the server's Finished message and sent its Finished.
+	// We have to wait for the first forward-secure packet from the server before
+	// deleting all handshake packets from the history.
+	if !s.receivedFirstForwardSecurePacket && packet.encryptionLevel == protocol.EncryptionForwardSecure {
+		s.receivedFirstForwardSecurePacket = true
+		s.sentPacketHandler.SetHandshakeComplete()
 	}
 
 	s.lastRcvdPacketNumber = hdr.PacketNumber
@@ -827,6 +838,13 @@ func (s *session) sendPacket() (bool, error) {
 		if retransmitPacket == nil {
 			break
 		}
+		// Don't retransmit Initial packets if we already received a response.
+		// An Initial might have been retransmitted multiple times before we receive a response.
+		// As soon as we receive one response, we don't need to send any more Initials.
+		if s.receivedFirstPacket && retransmitPacket.PacketType == protocol.PacketTypeInitial {
+			utils.Debugf("Skipping retransmission of packet %d. Already received a response to an Initial.", retransmitPacket.PacketNumber)
+			continue
+		}
 
 		// retransmit handshake packets
 		if retransmitPacket.EncryptionLevel != protocol.EncryptionForwardSecure {
@@ -875,9 +893,10 @@ func (s *session) sendPacket() (bool, error) {
 }
 
 func (s *session) sendPackedPacket(packet *packedPacket) error {
-	defer putPacketBuffer(packet.raw)
+	defer putPacketBuffer(&packet.raw)
 	err := s.sentPacketHandler.SentPacket(&ackhandler.Packet{
 		PacketNumber:    packet.header.PacketNumber,
+		PacketType:      packet.header.Type,
 		Frames:          packet.frames,
 		Length:          protocol.ByteCount(len(packet.raw)),
 		EncryptionLevel: packet.encryptionLevel,
